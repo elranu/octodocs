@@ -208,7 +208,7 @@ impl Renderer {
                 Event::Start(Tag::Strikethrough) => strikethrough = true,
                 Event::End(TagEnd::Strikethrough) => strikethrough = false,
 
-                Event::Html(html) => {
+                Event::Html(html) | Event::InlineHtml(html) => {
                     let token = html.trim().to_lowercase();
                     if token == "<u>" || token == "<ins>" {
                         underline = true;
@@ -234,6 +234,13 @@ impl Renderer {
                         } else if strikethrough {
                             Inline::Strikethrough(s)
                         } else {
+                            // pulldown-cmark does not always emit emphasis events for
+                            // intraword forms like `IT*ALI*C`. Handle that common typing
+                            // pattern as a fallback so WYSIWYG matches user expectation.
+                            if let Some(inlines) = parse_intraword_italic_fallback(&s) {
+                                inline_buf.extend(inlines);
+                                continue;
+                            }
                             Inline::Text(s)
                         };
                         inline_buf.push(inline);
@@ -278,6 +285,54 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
     }
 }
 
+fn parse_intraword_italic_fallback(text: &str) -> Option<Vec<Inline>> {
+    if !text.contains('*') {
+        return None;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<Inline> = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < chars.len() {
+        let open = (cursor..chars.len()).find(|&i| chars[i] == '*');
+        let Some(open_idx) = open else {
+            break;
+        };
+
+        if open_idx > cursor {
+            out.push(Inline::Text(chars[cursor..open_idx].iter().collect()));
+        }
+
+        let close = (open_idx + 1..chars.len()).find(|&i| chars[i] == '*');
+        let Some(close_idx) = close else {
+            out.push(Inline::Text(chars[open_idx..].iter().collect()));
+            cursor = chars.len();
+            break;
+        };
+
+        if close_idx == open_idx + 1 {
+            out.push(Inline::Text("**".to_string()));
+            cursor = close_idx + 1;
+            continue;
+        }
+
+        let italic_text: String = chars[open_idx + 1..close_idx].iter().collect();
+        out.push(Inline::Italic(italic_text));
+        cursor = close_idx + 1;
+    }
+
+    if cursor < chars.len() {
+        out.push(Inline::Text(chars[cursor..].iter().collect()));
+    }
+
+    if out.is_empty() || (out.len() == 1 && matches!(out[0], Inline::Text(_))) {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────
@@ -316,6 +371,48 @@ mod tests {
         let tree = Renderer::parse("Hello **world**");
         if let RenderNode::Paragraph(inlines) = &tree.0[0] {
             assert!(inlines.iter().any(|i| matches!(i, Inline::Bold(t) if t == "world")));
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_paragraph_with_strikethrough() {
+        let tree = Renderer::parse("Hello ~~world~~");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines
+                    .iter()
+                    .any(|i| matches!(i, Inline::Strikethrough(t) if t == "world"))
+            );
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_paragraph_with_underline_tag() {
+        let tree = Renderer::parse("Hello <u>world</u>");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines
+                    .iter()
+                    .any(|i| matches!(i, Inline::Underline(t) if t == "world"))
+            );
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_intraword_italic_fallback() {
+        let tree = Renderer::parse("IT*ALI*C ITALIC");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines.iter().any(|i| matches!(i, Inline::Italic(t) if t == "ALI")),
+                "expected intraword italic fallback, got: {:?}",
+                inlines
+            );
         } else {
             panic!("expected paragraph");
         }

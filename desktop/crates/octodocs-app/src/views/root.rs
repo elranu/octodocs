@@ -326,7 +326,7 @@ impl Render for RootView {
             (Some(current), Some(last)) => current == last,
             _ => false,
         };
-        drop(app);
+        let _ = app;
 
         if repo_add_modal_open {
             if let Ok(Some(token)) = get_stored_token() {

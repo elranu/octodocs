@@ -243,6 +243,7 @@ fn render_inline(inline: &Inline, theme: &adabraka_ui::theme::Theme) -> AnyEleme
             .weight(gpui::FontWeight::BOLD)
             .into_any_element(),
         Inline::Italic(t) => Text::new(t.clone())
+            .italic()
             .into_any_element(),
         Inline::Underline(t) => Text::new(t.clone())
             .underline()

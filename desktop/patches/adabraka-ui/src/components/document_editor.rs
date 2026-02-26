@@ -186,35 +186,6 @@ impl DocumentEditorState {
         self.paragraphs[para_idx].char_count()
     }
 
-    fn clamped_cursor(&self, c: DocCursor) -> DocCursor {
-        let para_idx = c.para_idx.min(self.num_paras().saturating_sub(1));
-        let char_offset = c.char_offset.min(self.para_char_count(para_idx));
-        DocCursor { para_idx, char_offset }
-    }
-
-    /// Flat char offset of a DocCursor within the whole document
-    /// (paragraphs separated by one `\n`).
-    fn cursor_to_flat_offset(&self, c: DocCursor) -> usize {
-        let mut off = 0;
-        for i in 0..c.para_idx {
-            off += self.para_char_count(i) + 1; // +1 for the '\n' separator
-        }
-        off + c.char_offset
-    }
-
-    /// Convert a document-flat char offset back to `DocCursor`.
-    fn flat_offset_to_cursor(&self, mut off: usize) -> DocCursor {
-        for (i, para) in self.paragraphs.iter().enumerate() {
-            let len = para.char_count();
-            if off <= len {
-                return DocCursor { para_idx: i, char_offset: off };
-            }
-            off -= len + 1;
-        }
-        let last = self.num_paras() - 1;
-        DocCursor { para_idx: last, char_offset: self.para_char_count(last) }
-    }
-
     /// Find which visual line contains the given cursor position.
     fn visual_line_for_cursor(&self, c: DocCursor) -> Option<&VisualLine> {
         self.layout_cache.iter().find(|vl| {
@@ -226,54 +197,126 @@ impl DocumentEditorState {
 
     // ── Span / text mutation helpers ─────────────────────────────────────────
 
-    /// Return the plain-text char at the given position (or None at boundaries).
-    fn char_before_cursor(&self, c: DocCursor) -> Option<char> {
-        if c.char_offset == 0 { return None; }
-        self.paragraphs[c.para_idx]
-            .plain_text()
-            .chars()
-            .nth(c.char_offset - 1)
+    /// Merge adjacent spans that share the same format and drop empty spans.
+    fn merge_adjacent_spans(spans: &mut Vec<InlineSpan>) {
+        let mut merged: Vec<InlineSpan> = Vec::with_capacity(spans.len());
+        for span in spans.drain(..) {
+            if span.text.is_empty() {
+                continue;
+            }
+            if let Some(last) = merged.last_mut() {
+                if last.format == span.format {
+                    last.text.push_str(&span.text);
+                    continue;
+                }
+            }
+            merged.push(span);
+        }
+
+        if merged.is_empty() {
+            merged.push(InlineSpan {
+                text: String::new(),
+                format: InlineFormat::Plain,
+            });
+        }
+        *spans = merged;
     }
 
-    fn char_after_cursor(&self, c: DocCursor) -> Option<char> {
-        self.paragraphs[c.para_idx]
-            .plain_text()
-            .chars()
-            .nth(c.char_offset)
+    fn split_text_at_char(text: &str, at: usize) -> (String, String) {
+        let mut before = String::new();
+        let mut after = String::new();
+        for (i, ch) in text.chars().enumerate() {
+            if i < at {
+                before.push(ch);
+            } else {
+                after.push(ch);
+            }
+        }
+        (before, after)
     }
 
-    /// Rebuild paragraph spans from a new flat text, trying to preserve
-    /// existing span formatting wherever possible. For simplicity this
-    /// implementation writes all text as plain spans; a smarter approach would
-    /// splice only the changed range. For the MVP this is sufficient.
-    fn rebuild_spans_from_text(para: &mut DocParagraph, new_text: String) {
-        // Preserve the first span's format as the "current format"
-        let fmt = para.spans.first().map(|s| s.format).unwrap_or(InlineFormat::Plain);
-        para.spans = vec![InlineSpan { text: new_text, format: fmt }];
+    fn split_spans_at_char(spans: &[InlineSpan], at: usize) -> (Vec<InlineSpan>, Vec<InlineSpan>) {
+        let mut left: Vec<InlineSpan> = Vec::new();
+        let mut right: Vec<InlineSpan> = Vec::new();
+
+        let mut char_pos = 0usize;
+        for span in spans {
+            let span_len = span.text.chars().count();
+            let span_start = char_pos;
+            let span_end = span_start + span_len;
+
+            if at <= span_start {
+                right.push(InlineSpan {
+                    text: span.text.clone(),
+                    format: span.format,
+                });
+            } else if at >= span_end {
+                left.push(InlineSpan {
+                    text: span.text.clone(),
+                    format: span.format,
+                });
+            } else {
+                let split_at = at - span_start;
+                let (before, after) = Self::split_text_at_char(&span.text, split_at);
+                if !before.is_empty() {
+                    left.push(InlineSpan {
+                        text: before,
+                        format: span.format,
+                    });
+                }
+                if !after.is_empty() {
+                    right.push(InlineSpan {
+                        text: after,
+                        format: span.format,
+                    });
+                }
+            }
+            char_pos = span_end;
+        }
+
+        Self::merge_adjacent_spans(&mut left);
+        Self::merge_adjacent_spans(&mut right);
+        (left, right)
     }
 
     /// Higher-level helper: insert `text` at `DocCursor`, return new cursor.
     fn do_insert(&mut self, at: DocCursor, text: &str) -> DocCursor {
+        if text.is_empty() {
+            return at;
+        }
+
         let para = &mut self.paragraphs[at.para_idx];
-        let flat = para.plain_text();
-        let byte_pos: usize = flat.char_indices().nth(at.char_offset).map(|(b, _)| b).unwrap_or(flat.len());
-        let mut new_flat = flat.clone();
-        new_flat.insert_str(byte_pos, text);
+        let (mut left, mut right) = Self::split_spans_at_char(&para.spans, at.char_offset);
+        let insertion_format = left
+            .last()
+            .map(|s| s.format)
+            .or_else(|| right.first().map(|s| s.format))
+            .unwrap_or(InlineFormat::Plain);
+
+        left.push(InlineSpan {
+            text: text.to_string(),
+            format: insertion_format,
+        });
+        left.append(&mut right);
+        Self::merge_adjacent_spans(&mut left);
+        para.spans = left;
+
         let new_char_offset = at.char_offset + text.chars().count();
-        Self::rebuild_spans_from_text(para, new_flat);
         DocCursor { para_idx: at.para_idx, char_offset: new_char_offset }
     }
 
     /// Remove `count` chars starting at `at`, return new cursor.
     fn do_delete_chars(&mut self, at: DocCursor, count: usize) -> DocCursor {
+        if count == 0 {
+            return at;
+        }
+
         let para = &mut self.paragraphs[at.para_idx];
-        let flat = para.plain_text();
-        let byte_start = flat.char_indices().nth(at.char_offset).map(|(b, _)| b).unwrap_or(flat.len());
-        let end_offset = (at.char_offset + count).min(flat.chars().count());
-        let byte_end = flat.char_indices().nth(end_offset).map(|(b, _)| b).unwrap_or(flat.len());
-        let mut new_flat = flat.clone();
-        new_flat.replace_range(byte_start..byte_end, "");
-        Self::rebuild_spans_from_text(para, new_flat);
+        let (mut left, tail) = Self::split_spans_at_char(&para.spans, at.char_offset);
+        let (_, mut right) = Self::split_spans_at_char(&tail, count);
+        left.append(&mut right);
+        Self::merge_adjacent_spans(&mut left);
+        para.spans = left;
         at
     }
 
@@ -313,15 +356,15 @@ impl DocumentEditorState {
         }
 
         // Multi-paragraph selection: collapse by joining edges
-        let tail: String = {
-            let flat = self.paragraphs[end.para_idx].plain_text();
-            flat.chars().skip(end.char_offset).collect()
-        };
         // Truncate the start paragraph at the selection start
         {
-            let flat = self.paragraphs[start.para_idx].plain_text();
-            let new_text: String = flat.chars().take(start.char_offset).chain(tail.chars()).collect();
-            Self::rebuild_spans_from_text(&mut self.paragraphs[start.para_idx], new_text);
+            let (mut start_left, _) =
+                Self::split_spans_at_char(&self.paragraphs[start.para_idx].spans, start.char_offset);
+            let (_, mut end_right) =
+                Self::split_spans_at_char(&self.paragraphs[end.para_idx].spans, end.char_offset);
+            start_left.append(&mut end_right);
+            Self::merge_adjacent_spans(&mut start_left);
+            self.paragraphs[start.para_idx].spans = start_left;
         }
         // Remove the in-between and end paragraphs
         self.paragraphs.drain(start.para_idx + 1..=end.para_idx);
@@ -552,21 +595,12 @@ impl DocumentEditorState {
             // Enter: split paragraph at cursor
             let cur_para_idx = self.cursor.para_idx;
             let split_at = self.cursor.char_offset;
-            let flat = self.paragraphs[cur_para_idx].plain_text();
-            let (head, tail): (String, String) = {
-                let mut h = String::new();
-                let mut t = String::new();
-                for (i, ch) in flat.chars().enumerate() {
-                    if i < split_at { h.push(ch); } else { t.push(ch); }
-                }
-                (h, t)
-            };
-            let fmt = self.paragraphs[cur_para_idx].spans.first()
-                .map(|s| s.format).unwrap_or(InlineFormat::Plain);
-            Self::rebuild_spans_from_text(&mut self.paragraphs[cur_para_idx], head);
+            let (head, tail) =
+                Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
+            self.paragraphs[cur_para_idx].spans = head;
             let new_para = DocParagraph {
                 kind: ParagraphKind::Paragraph,
-                spans: vec![InlineSpan { text: tail, format: fmt }],
+                spans: tail,
             };
             self.paragraphs.insert(cur_para_idx + 1, new_para);
             self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
@@ -592,10 +626,10 @@ impl DocumentEditorState {
             // Merge with previous paragraph
             let prev_idx = self.cursor.para_idx - 1;
             let prev_len = self.para_char_count(prev_idx);
-            let current_flat = self.paragraphs[self.cursor.para_idx].plain_text();
-            let prev_flat = self.paragraphs[prev_idx].plain_text();
-            let merged = format!("{}{}", prev_flat, current_flat);
-            Self::rebuild_spans_from_text(&mut self.paragraphs[prev_idx], merged);
+            let mut merged = self.paragraphs[prev_idx].spans.clone();
+            merged.extend(self.paragraphs[self.cursor.para_idx].spans.clone());
+            Self::merge_adjacent_spans(&mut merged);
+            self.paragraphs[prev_idx].spans = merged;
             self.paragraphs.remove(self.cursor.para_idx);
             self.cursor = DocCursor { para_idx: prev_idx, char_offset: prev_len };
         }
@@ -615,10 +649,10 @@ impl DocumentEditorState {
             self.do_delete_chars(self.cursor, 1);
         } else if self.cursor.para_idx + 1 < self.num_paras() {
             // Merge with next paragraph
-            let next_flat = self.paragraphs[self.cursor.para_idx + 1].plain_text();
-            let cur_flat = self.paragraphs[self.cursor.para_idx].plain_text();
-            let merged = format!("{}{}", cur_flat, next_flat);
-            Self::rebuild_spans_from_text(&mut self.paragraphs[self.cursor.para_idx], merged);
+            let mut merged = self.paragraphs[self.cursor.para_idx].spans.clone();
+            merged.extend(self.paragraphs[self.cursor.para_idx + 1].spans.clone());
+            Self::merge_adjacent_spans(&mut merged);
+            self.paragraphs[self.cursor.para_idx].spans = merged;
             self.paragraphs.remove(self.cursor.para_idx + 1);
         }
         cx.notify();
@@ -668,7 +702,7 @@ impl DocumentEditorState {
 
     // ── Formatting ────────────────────────────────────────────────────────────
 
-    /// Toggle bold on the current selection (or the current paragraph if no selection).
+    /// Toggle bold on the current selection.
     pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
         self.toggle_format(InlineFormat::Bold, cx);
     }
@@ -704,7 +738,26 @@ impl DocumentEditorState {
         let para = &mut self.paragraphs[start.para_idx];
         let flat = para.plain_text();
 
-        // Rebuild spans: split at start/end boundaries and toggle format in range
+        // Determine whether to apply or clear formatting uniformly across the
+        // selected range.
+        let mut has_non_fmt = false;
+        let mut probe_char_pos = 0usize;
+        for span in &para.spans {
+            let span_chars = span.text.chars().count();
+            let span_start = probe_char_pos;
+            let span_end = span_start + span_chars;
+            probe_char_pos = span_end;
+
+            let overlap_start = span_start.max(start.char_offset);
+            let overlap_end = span_end.min(end.char_offset);
+            if overlap_start < overlap_end && span.format != fmt {
+                has_non_fmt = true;
+                break;
+            }
+        }
+
+        // Rebuild spans: split at start/end boundaries and apply one target
+        // format across the full selected range.
         let mut new_spans: Vec<InlineSpan> = Vec::new();
         let mut char_pos = 0usize;
 
@@ -733,7 +786,7 @@ impl DocumentEditorState {
             if overlap_start < overlap_end {
                 let text: String = flat.chars().skip(overlap_start).take(overlap_end - overlap_start).collect();
                 if !text.is_empty() {
-                    let new_fmt = if span.format == fmt { InlineFormat::Plain } else { fmt };
+                    let new_fmt = if has_non_fmt { fmt } else { InlineFormat::Plain };
                     new_spans.push(InlineSpan { text, format: new_fmt });
                 }
             }
@@ -786,8 +839,7 @@ impl DocumentEditorState {
         }
 
         // Click above all content — go to start of document.
-        let last = self.num_paras() - 1;
-        DocCursor { para_idx: last, char_offset: self.para_char_count(last) }
+        DocCursor::zero()
     }
 
     // ── IME helpers ───────────────────────────────────────────────────────────
@@ -798,7 +850,11 @@ impl DocumentEditorState {
     }
 
     fn char_offset_to_utf16_in_para(&self, char_off: usize) -> usize {
-        let text = self.current_para_content();
+        self.char_offset_to_utf16_for_para(self.cursor.para_idx, char_off)
+    }
+
+    fn char_offset_to_utf16_for_para(&self, para_idx: usize, char_off: usize) -> usize {
+        let text = self.paragraphs[para_idx].plain_text();
         let mut u16 = 0usize;
         let mut chars_seen = 0usize;
         for ch in text.chars() {
@@ -986,11 +1042,13 @@ impl EntityInputHandler for DocumentEditorState {
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
+        point: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(self.char_offset_to_utf16_in_para(self.cursor.char_offset))
+        let bounds = self.last_bounds?;
+        let cursor = self.cursor_from_point(point, bounds);
+        Some(self.char_offset_to_utf16_for_para(cursor.para_idx, cursor.char_offset))
     }
 }
 
@@ -1100,9 +1158,7 @@ fn span_font(format: InlineFormat, base_font: &Font, mono_font_family: &SharedSt
             ..base_font.clone()
         },
         InlineFormat::Italic => Font {
-            // Use oblique as a robust fallback when no dedicated italic face
-            // is available for the active family on Linux.
-            style: FontStyle::Oblique,
+            style: FontStyle::Italic,
             ..base_font.clone()
         },
         InlineFormat::Underline | InlineFormat::Strikethrough => base_font.clone(),
@@ -1123,6 +1179,7 @@ fn spans_to_text_runs(
     base_font: &Font,
     base_color: Hsla,
     emphasis_color: Hsla,
+    code_color: Hsla,
     mono_font_family: &SharedString,
 ) -> (String, Vec<TextRun>) {
     let mut line_text = String::new();
@@ -1156,17 +1213,12 @@ fn spans_to_text_runs(
         let byte_len = run_text.len();
         let font = span_font(span.format, base_font, mono_font_family);
         let color = match span.format {
-            InlineFormat::Code => hsla(0.55, 0.7, 0.5, 1.0),
+            InlineFormat::Code => code_color,
             InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
             InlineFormat::Plain => base_color,
         };
 
         let underline = match span.format {
-            InlineFormat::Italic => Some(UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(emphasis_color),
-                wavy: true,
-            }),
             InlineFormat::Underline => Some(UnderlineStyle {
                 thickness: px(1.0),
                 color: Some(emphasis_color),
@@ -1217,10 +1269,7 @@ struct DocumentEditorElement {
     state: Entity<DocumentEditorState>,
 }
 
-struct EditorPrepaintState {
-    /// Total content height (for request_layout sizing).
-    content_height: Pixels,
-}
+struct EditorPrepaintState;
 
 impl IntoElement for DocumentEditorElement {
     type Element = Self;
@@ -1291,7 +1340,8 @@ impl Element for DocumentEditorElement {
             }
         }
 
-        EditorPrepaintState { content_height: px(total_h) }
+        let _ = total_h;
+        EditorPrepaintState
     }
 
     fn paint(
@@ -1326,6 +1376,9 @@ impl Element for DocumentEditorElement {
         base_font.style = FontStyle::Normal;
         let mono_family: SharedString = theme.tokens.font_mono.clone().into();
         let emphasis_color = theme.tokens.primary;
+        let code_color = theme.tokens.primary.opacity(0.85);
+        let selection_color = theme.tokens.primary.opacity(0.22);
+        let caret_color = theme.tokens.primary;
 
         let (paragraphs, cursor, selection) = {
             let s = self.state.read(cx);
@@ -1448,6 +1501,7 @@ impl Element for DocumentEditorElement {
                         &base_font,
                         para_color,
                         emphasis_color,
+                        code_color,
                         &mono_family,
                     );
                     let total_run_bytes: usize = runs.iter().map(|r| r.len).sum();
@@ -1544,7 +1598,7 @@ impl Element for DocumentEditorElement {
                             point(sel_x_start, line_y_screen),
                             size(sel_width, px(vl.height_px)),
                         ),
-                        rgba(0x4477ff35),
+                        selection_color,
                     ));
                 }
             }
@@ -1575,7 +1629,7 @@ impl Element for DocumentEditorElement {
                         point(cursor_x, cursor_y_screen),
                         size(px(2.0), px(vl.height_px)),
                     ),
-                    rgb(0x0099ff),
+                    caret_color,
                 ));
             }
         }

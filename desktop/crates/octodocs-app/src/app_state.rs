@@ -595,15 +595,6 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn clear_github_bindings(&mut self, cx: &mut Context<AppState>) {
-        self.github_bindings.clear();
-        self.active_binding_idx = None;
-        self.persist_github_bindings_to_disk();
-        self.persist_ui_state_to_disk();
-        self.github_sync_status = SyncStatus::Idle;
-        cx.notify();
-    }
-
     /// Save to the current path (falls back to save_as if no path set).
     pub fn save(&mut self, cx: &mut Context<AppState>) {
         if self.document.path.is_some() {

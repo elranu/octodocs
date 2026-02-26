@@ -221,7 +221,6 @@ impl FileTypeFilter {
 
 #[derive(IntoElement)]
 pub struct FileUpload {
-    id: ElementId,
     base: Stateful<Div>,
     state: Entity<FileUploadState>,
     size: FileUploadSize,
@@ -242,7 +241,6 @@ impl FileUpload {
     pub fn new(id: impl Into<ElementId>, state: Entity<FileUploadState>) -> Self {
         let id = id.into();
         Self {
-            id: id.clone(),
             base: div().id(id),
             state,
             size: FileUploadSize::Md,
@@ -334,28 +332,6 @@ impl FileUpload {
         self
     }
 
-    fn validate_file(&self, path: &PathBuf) -> Result<(), String> {
-        if let Some(ref filter) = self.file_types {
-            if !filter.matches(path) {
-                let allowed = if filter.extensions.is_empty() {
-                    "all files".to_string()
-                } else {
-                    filter.extensions.join(", ")
-                };
-                return Err(format!("File type not allowed. Accepted: {}", allowed));
-            }
-        }
-
-        if let Some(max_size) = self.max_file_size {
-            let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            if file_size > max_size {
-                let max_mb = max_size as f64 / (1024.0 * 1024.0);
-                return Err(format!("File exceeds maximum size of {:.1} MB", max_mb));
-            }
-        }
-
-        Ok(())
-    }
 }
 
 impl Styled for FileUpload {

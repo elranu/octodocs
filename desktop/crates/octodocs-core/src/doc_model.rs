@@ -329,9 +329,7 @@ pub fn doc_paragraphs_to_markdown(paragraphs: &[DocParagraph]) -> String {
                 format!("```mermaid\n{}\n```", src)
             }
         };
-        if !block.is_empty() {
-            parts.push(block);
-        }
+        parts.push(block);
     }
     let mut result = parts.join("\n\n");
     if !result.is_empty() {
@@ -380,6 +378,71 @@ mod tests {
         let out = roundtrip(md);
         assert!(out.contains("```rust"), "got: {out}");
         assert!(out.contains("fn main()"), "got: {out}");
+    }
+
+    #[test]
+    fn underline_roundtrip() {
+        let md = "<u>underlined</u>\n";
+        let out = roundtrip(md);
+        assert!(
+            out.contains("<u>underlined</u>"),
+            "expected underline to round-trip, got: {out}"
+        );
+    }
+
+    #[test]
+    fn strikethrough_roundtrip() {
+        let md = "Some ~~struck~~ text\n";
+        let out = roundtrip(md);
+        assert!(
+            out.contains("~~struck~~"),
+            "expected strikethrough to round-trip, got: {out}"
+        );
+    }
+
+    #[test]
+    fn coalesces_adjacent_same_format_spans() {
+        let paragraphs = vec![DocParagraph {
+            kind: ParagraphKind::Paragraph,
+            spans: vec![
+                InlineSpan {
+                    text: "bold".to_string(),
+                    format: InlineFormat::Bold,
+                },
+                InlineSpan {
+                    text: "also bold".to_string(),
+                    format: InlineFormat::Bold,
+                },
+            ],
+        }];
+
+        let out = doc_paragraphs_to_markdown(&paragraphs);
+        assert!(!out.contains("**bold****also bold**"), "got: {out}");
+        assert!(out.contains("**boldalso bold**"), "got: {out}");
+    }
+
+    #[test]
+    fn preserves_empty_paragraphs() {
+        let paragraphs = vec![
+            DocParagraph {
+                kind: ParagraphKind::Paragraph,
+                spans: vec![InlineSpan {
+                    text: "first".to_string(),
+                    format: InlineFormat::Plain,
+                }],
+            },
+            DocParagraph::empty(),
+            DocParagraph {
+                kind: ParagraphKind::Paragraph,
+                spans: vec![InlineSpan {
+                    text: "third".to_string(),
+                    format: InlineFormat::Plain,
+                }],
+            },
+        ];
+
+        let out = doc_paragraphs_to_markdown(&paragraphs);
+        assert!(out.contains("first\n\n\n\nthird\n"), "got: {out}");
     }
 
     #[test]

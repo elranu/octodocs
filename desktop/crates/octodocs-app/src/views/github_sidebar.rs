@@ -459,7 +459,7 @@ impl Render for GithubSidebar {
         let app = self.app_state.read(cx);
         let bindings = app.github_bindings.clone();
         let active_idx = self.active_index(bindings.len(), app.active_binding_idx);
-        drop(app);
+        let _ = app;
 
         let repo_selector: AnyElement = if bindings.is_empty() {
             let add_weak = weak.clone();

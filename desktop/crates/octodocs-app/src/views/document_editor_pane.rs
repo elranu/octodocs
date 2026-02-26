@@ -20,6 +20,10 @@ impl DocumentEditorPane {
 impl Render for DocumentEditorPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editor_state = self.app_state.read(cx).doc_editor.clone();
-        DocumentEditor::new(&editor_state)
+        scrollable_vertical(
+            div()
+                .size_full()
+                .child(DocumentEditor::new(&editor_state)),
+        )
     }
 }
