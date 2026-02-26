@@ -66,6 +66,19 @@ References:
 
 ---
 
+## Current Implementation Status (2026-02-26)
+
+- ✅ Phases 1–6 complete — auth, discovery, push-on-save, UI panel, sync badge all working
+- ✅ Phase 7 replaced: sidecar config replaced by TSV-based binding persistence (`~/.config/octodocs/github_bindings.tsv`)
+- ✅ Multi-repo support: multiple bindings with folder-level granularity
+- ✅ Token storage: keyring + file fallback (`~/.config/octodocs/token`)
+- ✅ Subfolder-aware sync: `relative_sync_path()` preserves directory structure
+- ✅ Rename sync: old file deleted + new file pushed on GitHub
+- ✅ Recursive initial import via `pull_markdown_files()`
+- ⚠️ Phase 8 (automated tests) not yet implemented
+
+---
+
 ## Index
 
 - [x] Phase 1: [New `octodocs-github` Crate](#phase-1-new-octodocs-github-crate)
@@ -383,12 +396,12 @@ sequenceDiagram
 
 ### Phase 7: Sidecar Config Persistence
 
-- [ ] Create `config::GitHubSyncConfig` as a `serde::Serialize + Deserialize` struct
-- [ ] `config::save_sidecar(doc_path: &Path, config: &GitHubSyncConfig)` — writes `{doc_stem}.octodocs` JSON file next to the `.md` file
-- [ ] `config::load_sidecar(doc_path: &Path) -> Option<GitHubSyncConfig>` — reads and deserializes the sidecar file; returns `None` if absent or parse fails
-- [ ] In `AppState::load_document(doc, cx)` — after loading the document, call `load_sidecar` and set `self.github_config`
-- [ ] In `AppState::save_as(cx)` — copy sidecar to new path on Save As
-- [ ] For untitled docs: config stored in `~/.config/octodocs/default.octodocs` (overwritten each session)
+**Status: REPLACED** — The original plan called for `.octodocs` JSON sidecar files next to each `.md` file. This was replaced by a centralized TSV binding file at `~/.config/octodocs/github_bindings.tsv` which maps `local_root` → `owner/repo/branch/folder`. This approach is simpler and avoids littering the user's workspace with sidecar files.
+
+- [x] Binding persistence via `github_bindings.tsv` (implemented in `app_state.rs`)
+- [x] Bindings survive app restart
+- [x] Multiple bindings supported (one per local folder)
+- [x] UI state persistence via `ui_state.tsv` (sidebar open/closed, active binding index)
 
 ### Phase 8: Testing
 
@@ -450,11 +463,11 @@ References:
 
 ## Success Criteria
 
-- [ ] User can authenticate with GitHub in-app with no terminal and no redirect URL
-- [ ] User can select any repo, branch, and folder they have write access to from a picker UI
-- [ ] Every Save (Ctrl+S) automatically pushes the document to the configured GitHub location
-- [ ] A commit appears in the GitHub repository after each save, with a clear commit message
-- [ ] Sync target config survives app restart (sidecar + keyring)
-- [ ] The sync badge accurately reflects the current sync state (Idle / Syncing / Success / Failed)
+- [x] User can authenticate with GitHub in-app with no terminal and no redirect URL
+- [x] User can select any repo, branch, and folder they have write access to from a picker UI
+- [x] Every Save (Ctrl+S) automatically pushes the document to the configured GitHub location
+- [x] A commit appears in the GitHub repository after each save, with a clear commit message
+- [x] Sync target config survives app restart (TSV bindings + keyring)
+- [x] The sync badge accurately reflects the current sync state (5 contextual states)
 - [ ] `cargo test -p octodocs-github` passes with no GPUI or UI dependency
-- [ ] App window remains responsive during sync (no UI freeze)
+- [x] App window remains responsive during sync (no UI freeze)

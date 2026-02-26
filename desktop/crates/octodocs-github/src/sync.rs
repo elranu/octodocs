@@ -27,6 +27,13 @@ struct FileUpdateResponse {
     commit: CommitInfo,
 }
 
+#[derive(Debug, Serialize)]
+struct DeleteFileRequest<'a> {
+    message: &'a str,
+    sha: &'a str,
+    branch: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 struct CommitInfo {
     sha: String,
@@ -118,4 +125,47 @@ pub fn push_file(
         .with_context(|| format!("Failed to parse push response for '{path}'"))?;
 
     Ok(update.commit.sha)
+}
+
+pub fn delete_file(token: &str, config: &GitHubSyncConfig, filename: &str) -> Result<Option<String>> {
+    let Some(existing_sha) = get_file_sha(token, config, filename)? else {
+        return Ok(None);
+    };
+
+    let client = client::build(token)?;
+    let path = build_repo_path(config, filename);
+    let url = format!(
+        "{API_BASE}/repos/{}/{}/contents/{}",
+        config.owner, config.repo, path
+    );
+    let message = format!("OctoDocs: delete {filename}");
+
+    let body = DeleteFileRequest {
+        message: &message,
+        sha: &existing_sha,
+        branch: &config.branch,
+    };
+
+    let response = client
+        .delete(&url)
+        .json(&body)
+        .send()
+        .with_context(|| {
+            format!(
+                "Failed to delete '{path}' from {}/{}#{}",
+                config.owner, config.repo, config.branch
+            )
+        })?
+        .error_for_status()
+        .with_context(|| {
+            format!(
+                "GitHub returned error while deleting '{path}'",
+            )
+        })?;
+
+    let update: FileUpdateResponse = response
+        .json()
+        .with_context(|| format!("Failed to parse delete response for '{path}'"))?;
+
+    Ok(Some(update.commit.sha))
 }

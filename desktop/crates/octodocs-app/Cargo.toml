@@ -11,3 +11,4 @@ gpui = { package = "adabraka-gpui", version = "0.3" }
 rfd = "0.15"
 anyhow = "1"
 dotenvy = "0.15"
+dirs = "6"

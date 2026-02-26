@@ -254,9 +254,18 @@ pub fn wait_for_token(client_id: &str, handle: &DeviceFlowHandle) -> Result<Stri
 
 pub fn store_token(token: &str) -> Result<()> {
     let keyring = KeyringStore;
-    match keyring.set_token(token) {
-        Ok(()) => Ok(()),
-        Err(_) => FileStore::default().set_token(token),
+    let file = FileStore::default();
+
+    let keyring_result = keyring.set_token(token);
+    let file_result = file.set_token(token);
+
+    match (keyring_result, file_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(_)) => Ok(()),
+        (Err(_), Ok(())) => Ok(()),
+        (Err(keyring_err), Err(file_err)) => Err(anyhow::anyhow!(
+            "Failed to store token in keyring ({keyring_err}) and file ({file_err})"
+        )),
     }
 }
 
