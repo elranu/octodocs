@@ -2,7 +2,10 @@
 
 use adabraka_ui::prelude::*;
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
+use adabraka_ui::components::input::Input;
+use adabraka_ui::components::input_state::InputState;
 use gpui::{ClipboardItem, Task, WeakEntity};
+use std::path::PathBuf;
 use octodocs_github::{
     start_device_flow, wait_for_token, get_stored_token, store_token, clear_stored_token,
     list_repos, list_branches, list_folder,
@@ -52,6 +55,14 @@ fn open_external_url(url: &str) -> Result<(), String> {
     Err("Opening links is not supported on this OS".to_string())
 }
 
+fn default_local_root_for_repo(repo_name: &str) -> PathBuf {
+    let base = dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    base.join(repo_name)
+}
+
 /// Panel states for the multi-step setup flow.
 #[derive(Debug, Clone)]
 pub enum PanelState {
@@ -95,21 +106,55 @@ pub enum PanelState {
 
 pub struct GitHubPanel {
     app_state: Entity<AppState>,
+    auth_token: Option<String>,
+    selected_local_root: Option<PathBuf>,
+    repo_search_input: Entity<InputState>,
     state: PanelState,
     _task: Option<Task<()>>,
 }
 
 impl GitHubPanel {
-    pub fn new(app_state: Entity<AppState>) -> Self {
+    pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let repo_search_input = cx.new(|cx| InputState::new(cx).placeholder("Search repositories..."));
+
         Self {
             app_state,
+            auth_token: None,
+            selected_local_root: None,
+            repo_search_input,
             state: PanelState::Loading,
             _task: None,
         }
     }
 
+    fn active_token(&self) -> Option<String> {
+        self.auth_token
+            .clone()
+            .or_else(|| get_stored_token().ok().flatten())
+    }
+
     /// Initialize the panel by checking for existing token.
     pub fn init(&mut self, cx: &mut Context<Self>) {
+        let app = self.app_state.read(cx);
+        let current_path = app.document.path.clone();
+        let bindings = app.github_bindings.clone();
+        drop(app);
+
+        if let Some(path) = current_path.as_ref() {
+            if let Some(binding) = bindings
+                .iter()
+                .filter(|binding| path.starts_with(&binding.local_root))
+                .max_by_key(|binding| binding.local_root.components().count())
+            {
+                self.selected_local_root = Some(binding.local_root.clone());
+                self.state = PanelState::Confirm {
+                    config: binding.config.clone(),
+                };
+                cx.notify();
+                return;
+            }
+        }
+
         self.state = PanelState::Loading;
         cx.notify();
 
@@ -119,8 +164,9 @@ impl GitHubPanel {
 
             let _ = weak.update(cx, |panel, cx| {
                 match token {
-                    Ok(Some(_)) => panel.load_repos(cx),
+                    Ok(Some(token)) => panel.load_repos_with_token(token, cx),
                     Ok(None) | Err(_) => {
+                        panel.auth_token = None;
                         panel.state = PanelState::Unauthenticated;
                         cx.notify();
                     }
@@ -191,7 +237,7 @@ impl GitHubPanel {
                             cx.notify();
                             return;
                         }
-                        panel.load_repos(cx);
+                        panel.load_repos_with_token(token, cx);
                     }
                     Err(e) => {
                         panel.state = PanelState::Error {
@@ -206,6 +252,19 @@ impl GitHubPanel {
 
     /// Load repos for authenticated user.
     fn load_repos(&mut self, cx: &mut Context<Self>) {
+        let token = get_stored_token().ok().flatten();
+        let Some(token) = token else {
+            self.state = PanelState::Unauthenticated;
+            cx.notify();
+            return;
+        };
+
+        self.load_repos_with_token(token, cx);
+    }
+
+    /// Load repos using a known-good token.
+    fn load_repos_with_token(&mut self, token: String, cx: &mut Context<Self>) {
+        self.auth_token = Some(token.clone());
         self.state = PanelState::RepoSelect {
             repos: vec![],
             loading: true,
@@ -214,15 +273,6 @@ impl GitHubPanel {
 
         let weak = cx.entity().downgrade();
         self._task = Some(cx.spawn(async move |_, cx| {
-            let token = get_stored_token().ok().flatten();
-            let Some(token) = token else {
-                let _ = weak.update(cx, |panel, cx| {
-                    panel.state = PanelState::Unauthenticated;
-                    cx.notify();
-                });
-                return;
-            };
-
             let repos = cx
                 .background_executor()
                 .spawn(async move { list_repos(&token) })
@@ -247,6 +297,13 @@ impl GitHubPanel {
 
     /// Select a repo and load its branches.
     pub fn select_repo(&mut self, repo: RepoInfo, cx: &mut Context<Self>) {
+        let Some(token) = self.active_token() else {
+            self.auth_token = None;
+            self.state = PanelState::Unauthenticated;
+            cx.notify();
+            return;
+        };
+
         self.state = PanelState::BranchSelect {
             repo: repo.clone(),
             branches: vec![],
@@ -259,15 +316,6 @@ impl GitHubPanel {
         let name = repo.name.clone();
 
         self._task = Some(cx.spawn(async move |_, cx| {
-            let token = get_stored_token().ok().flatten();
-            let Some(token) = token else {
-                let _ = weak.update(cx, |panel, cx| {
-                    panel.state = PanelState::Unauthenticated;
-                    cx.notify();
-                });
-                return;
-            };
-
             let branches = cx
                 .background_executor()
                 .spawn(async move { list_branches(&token, &owner, &name) })
@@ -296,6 +344,13 @@ impl GitHubPanel {
 
     /// Select a branch and load root folder.
     pub fn select_branch(&mut self, repo: RepoInfo, branch: String, cx: &mut Context<Self>) {
+        let Some(token) = self.active_token() else {
+            self.auth_token = None;
+            self.state = PanelState::Unauthenticated;
+            cx.notify();
+            return;
+        };
+
         self.state = PanelState::FolderSelect {
             repo: repo.clone(),
             branch: branch.clone(),
@@ -311,15 +366,6 @@ impl GitHubPanel {
         let branch_clone = branch.clone();
 
         self._task = Some(cx.spawn(async move |_, cx| {
-            let token = get_stored_token().ok().flatten();
-            let Some(token) = token else {
-                let _ = weak.update(cx, |panel, cx| {
-                    panel.state = PanelState::Unauthenticated;
-                    cx.notify();
-                });
-                return;
-            };
-
             let folders = cx
                 .background_executor()
                 .spawn(async move { list_folder(&token, &owner, &name, &branch_clone, "") })
@@ -350,6 +396,13 @@ impl GitHubPanel {
 
     /// Navigate into a folder.
     pub fn enter_folder(&mut self, folder_path: String, cx: &mut Context<Self>) {
+        let Some(token) = self.active_token() else {
+            self.auth_token = None;
+            self.state = PanelState::Unauthenticated;
+            cx.notify();
+            return;
+        };
+
         let (repo, branch) = match &self.state {
             PanelState::FolderSelect { repo, branch, .. } => (repo.clone(), branch.clone()),
             _ => return,
@@ -371,15 +424,6 @@ impl GitHubPanel {
         let folder_path_for_request = folder_path.clone();
 
         self._task = Some(cx.spawn(async move |_, cx| {
-            let token = get_stored_token().ok().flatten();
-            let Some(token) = token else {
-                let _ = weak.update(cx, |panel, cx| {
-                    panel.state = PanelState::Unauthenticated;
-                    cx.notify();
-                });
-                return;
-            };
-
             let folders = cx
                 .background_executor()
                 .spawn(async move {
@@ -424,8 +468,48 @@ impl GitHubPanel {
             _ => return,
         };
 
+        self.selected_local_root = self
+            .app_state
+            .read(cx)
+            .document
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+
         self.state = PanelState::Confirm { config };
         cx.notify();
+    }
+
+    pub fn choose_local_root(&mut self, repo_name: String, cx: &mut Context<Self>) {
+        let default_dir = default_local_root_for_repo(&repo_name);
+        if let Err(err) = std::fs::create_dir_all(&default_dir) {
+            self.state = PanelState::Error {
+                message: format!("Failed to create default local folder: {err}"),
+            };
+            cx.notify();
+            return;
+        }
+
+        if let Some(path) = rfd::FileDialog::new().set_directory(&default_dir).pick_folder() {
+            self.selected_local_root = Some(path);
+            cx.notify();
+        }
+    }
+
+    pub fn use_default_local_root(&mut self, repo_name: String, cx: &mut Context<Self>) {
+        let default_dir = default_local_root_for_repo(&repo_name);
+        match std::fs::create_dir_all(&default_dir) {
+            Ok(_) => {
+                self.selected_local_root = Some(default_dir);
+                cx.notify();
+            }
+            Err(err) => {
+                self.state = PanelState::Error {
+                    message: format!("Failed to create local folder: {err}"),
+                };
+                cx.notify();
+            }
+        }
     }
 
     /// Apply the config to AppState and close panel.
@@ -435,8 +519,16 @@ impl GitHubPanel {
             _ => return,
         };
 
+        let Some(local_root) = self.selected_local_root.clone() else {
+            self.state = PanelState::Error {
+                message: "Select a local folder for this repository mapping".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+
         self.app_state.update(cx, |state, cx| {
-            state.github_config = Some(config);
+            state.upsert_github_binding(local_root, config, cx);
             state.github_panel_open = false;
             cx.notify();
         });
@@ -445,10 +537,10 @@ impl GitHubPanel {
     /// Disconnect — clear token and reset panel.
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         let _ = clear_stored_token();
+        self.auth_token = None;
+        self.selected_local_root = None;
         self.app_state.update(cx, |state, cx| {
-            state.github_config = None;
-            state.github_sync_status = octodocs_github::SyncStatus::Idle;
-            cx.notify();
+            state.clear_github_bindings(cx);
         });
         self.state = PanelState::Unauthenticated;
         cx.notify();
@@ -646,6 +738,20 @@ impl GitHubPanel {
                 }
 
                 let disconnect_weak = weak.clone();
+                let search_weak = weak.clone();
+                let query = self.repo_search_input.read(cx).content().trim().to_ascii_lowercase();
+                let filtered_repos = if query.is_empty() {
+                    repos.to_vec()
+                } else {
+                    repos
+                        .iter()
+                        .filter(|repo| {
+                            let full = format!("{}/{}", repo.owner, repo.name).to_ascii_lowercase();
+                            full.contains(&query)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
 
                 div()
                     .flex()
@@ -666,7 +772,15 @@ impl GitHubPanel {
                                     })
                             )
                     )
-                    .child(self.render_repo_list(repos, weak))
+                    .child(
+                        Input::new(&self.repo_search_input)
+                            .placeholder("Search repositories...")
+                            .on_change(move |_value, cx| {
+                                let _ = search_weak.update(cx, |_panel, cx| cx.notify());
+                            })
+                    )
+                    .child(body_small(&format!("{} repositories", filtered_repos.len())).color(theme.tokens.muted_foreground))
+                    .child(self.render_repo_list(&filtered_repos, weak))
                     .into_any_element()
             }
 
@@ -761,6 +875,31 @@ impl GitHubPanel {
             PanelState::Confirm { config } => {
                 let apply_weak = weak.clone();
                 let back_weak = weak.clone();
+                let choose_root_weak = weak.clone();
+                let use_default_root_weak = weak.clone();
+                let repo_name_for_pick = config.repo.clone();
+                let repo_name_for_default = config.repo.clone();
+                let suggested_default_root = default_local_root_for_repo(&config.repo)
+                    .display()
+                    .to_string();
+                let local_root_display = self
+                    .selected_local_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(not selected)".to_string());
+                let already_enabled = self
+                    .app_state
+                    .read(cx)
+                    .github_bindings
+                    .iter()
+                    .any(|binding| {
+                        binding.config == *config
+                            && self
+                                .selected_local_root
+                                .as_ref()
+                                .map(|root| *root == binding.local_root)
+                                .unwrap_or(false)
+                    });
                 let path_display = if config.folder.is_empty() {
                     format!("{}/{}:{}", config.owner, config.repo, config.branch)
                 } else {
@@ -779,7 +918,13 @@ impl GitHubPanel {
                             .justify_center()
                             .child(Icon::new(IconSource::Named("check".into())).size_12().color(theme.tokens.primary))
                     )
-                    .child(h4("Ready to sync!").text_center())
+                    .child(
+                        if already_enabled {
+                            h4("Sync is enabled").text_center()
+                        } else {
+                            h4("Ready to sync!").text_center()
+                        }
+                    )
                     .child(
                         div()
                             .px(px(16.0))
@@ -787,6 +932,34 @@ impl GitHubPanel {
                             .bg(theme.tokens.muted)
                             .rounded(px(8.0))
                             .child(body(&path_display).text_center())
+                    )
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .bg(theme.tokens.muted)
+                            .rounded(px(8.0))
+                            .child(body_small(format!("Local folder: {}", local_root_display)).text_center())
+                    )
+                    .child(body_small(format!("Suggested: {}", suggested_default_root)).color(theme.tokens.muted_foreground).text_center())
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                Button::new("choose-local-root", "Choose local folder")
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _w, cx| {
+                                        let _ = choose_root_weak.update(cx, |panel, cx| panel.choose_local_root(repo_name_for_pick.clone(), cx));
+                                    })
+                            )
+                            .child(
+                                Button::new("create-default-local-root", "Create & use default")
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _w, cx| {
+                                        let _ = use_default_root_weak.update(cx, |panel, cx| panel.use_default_local_root(repo_name_for_default.clone(), cx));
+                                    })
+                            )
                     )
                     .child(body_small("Documents will be pushed to this location on every save.").color(theme.tokens.muted_foreground).text_center())
                     .child(
@@ -801,7 +974,7 @@ impl GitHubPanel {
                                     })
                             )
                             .child(
-                                Button::new("apply", "Enable Sync")
+                                Button::new("apply", if already_enabled { "Keep Enabled" } else { "Enable Sync" })
                                     .variant(ButtonVariant::Default)
                                     .on_click(move |_, _w, cx| {
                                         let _ = apply_weak.update(cx, |panel, cx| panel.apply_config(cx));

@@ -29,7 +29,7 @@ impl RootView {
         let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
-        let github_panel = cx.new(|_| GitHubPanel::new(app_state.clone()));
+        let github_panel = cx.new(|cx| GitHubPanel::new(app_state.clone(), cx));
 
         // Re-render when AppState changes (content/block/mode changes).
         let pane_bep = block_editor_pane.clone();
@@ -222,6 +222,7 @@ impl Render for RootView {
         let view_mode = app.view_mode;
         let github_panel_open = app.github_panel_open;
         let github_sync_status = app.github_sync_status.clone();
+        let github_sync_configured = !app.github_bindings.is_empty();
         drop(app);
 
         let dirty_dot = if dirty { "● " } else { "" };
@@ -249,7 +250,20 @@ impl Render for RootView {
                 .flex()
                 .items_center()
                 .gap(px(4.0))
-                .child(Icon::new(IconSource::Named("cloud-off".into())).size_3().color(theme.tokens.muted_foreground))
+                .child(
+                    if github_sync_configured {
+                        Icon::new(IconSource::Named("cloud".into())).size_3().color(theme.tokens.primary)
+                    } else {
+                        Icon::new(IconSource::Named("cloud-off".into())).size_3().color(theme.tokens.muted_foreground)
+                    }
+                )
+                .child(
+                    if github_sync_configured {
+                        body_small("Configured").color(theme.tokens.primary)
+                    } else {
+                        body_small("Not configured").color(theme.tokens.muted_foreground)
+                    }
+                )
                 .into_any_element(),
             SyncStatus::Syncing => div()
                 .flex()

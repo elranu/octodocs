@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use reqwest::StatusCode;
 use serde::Deserialize;
 
 use crate::client;
@@ -141,7 +142,13 @@ pub fn list_folder(
                 "Failed to list folder '{}' in {owner}/{repo}#{branch}",
                 if clean_path.is_empty() { "/" } else { clean_path }
             )
-        })?
+        })?;
+
+    if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::CONFLICT {
+        return Ok(vec![]);
+    }
+
+    let response = response
         .error_for_status()
         .with_context(|| {
             format!("GitHub API returned error for folder listing in {owner}/{repo}")

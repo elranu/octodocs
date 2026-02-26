@@ -1,9 +1,16 @@
 use std::time::SystemTime;
+use std::path::{Path, PathBuf};
 
 use adabraka_ui::prelude::*;
 use gpui::{Subscription, Task};
 use octodocs_core::{Document, DocumentBlock, Renderer};
 use octodocs_github::{GitHubSyncConfig, SyncStatus};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubSyncBinding {
+    pub local_root: PathBuf,
+    pub config: GitHubSyncConfig,
+}
 
 /// Which content layout the user is currently viewing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +56,8 @@ pub struct AppState {
     pub editor_state: Entity<adabraka_ui::components::editor::EditorState>,
     /// Full-document editor for Source and Split modes.
     pub full_editor_state: Entity<adabraka_ui::components::editor::EditorState>,
-    /// Optional GitHub destination for autosync.
-    pub github_config: Option<GitHubSyncConfig>,
+    /// GitHub sync bindings: local root folder -> remote destination.
+    pub github_bindings: Vec<GitHubSyncBinding>,
     /// Runtime status of GitHub autosync.
     pub github_sync_status: SyncStatus,
     /// Whether the GitHub setup panel is open.
@@ -111,7 +118,7 @@ impl AppState {
             view_mode: ViewMode::Wysiwyg,
             editor_state,
             full_editor_state,
-            github_config: None,
+            github_bindings: vec![],
             github_sync_status: SyncStatus::Idle,
             github_panel_open: false,
             _sync_task: None,
@@ -174,7 +181,6 @@ impl AppState {
         self.blocks = vec![];
         self.active_block = None;
         self.dirty = false;
-        self.github_config = None;
         self.github_sync_status = SyncStatus::Idle;
         self.github_panel_open = false;
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
@@ -200,11 +206,6 @@ impl AppState {
     }
 
     fn trigger_github_sync(&mut self, cx: &mut Context<AppState>) {
-        let Some(config) = self.github_config.clone() else {
-            self.github_sync_status = SyncStatus::Idle;
-            return;
-        };
-
         let Some(path) = self.document.path.as_ref() else {
             self.github_sync_status = SyncStatus::Failed {
                 message: "Missing local document path for sync".to_string(),
@@ -212,6 +213,20 @@ impl AppState {
             cx.notify();
             return;
         };
+
+        let Some(binding) = self.find_sync_binding(path) else {
+            if self.github_bindings.is_empty() {
+                self.github_sync_status = SyncStatus::Idle;
+            } else {
+                self.github_sync_status = SyncStatus::Failed {
+                    message: "No GitHub sync mapping for this file path".to_string(),
+                };
+            }
+            cx.notify();
+            return;
+        };
+
+        let config = binding.config.clone();
 
         let Some(filename) = path.file_name().and_then(|f| f.to_str()).map(|f| f.to_string()) else {
             self.github_sync_status = SyncStatus::Failed {
@@ -263,6 +278,38 @@ impl AppState {
                 cx.notify();
             });
         }));
+    }
+
+    fn find_sync_binding(&self, doc_path: &Path) -> Option<&GitHubSyncBinding> {
+        self.github_bindings
+            .iter()
+            .filter(|binding| doc_path.starts_with(&binding.local_root))
+            .max_by_key(|binding| binding.local_root.components().count())
+    }
+
+    pub fn upsert_github_binding(
+        &mut self,
+        local_root: PathBuf,
+        config: GitHubSyncConfig,
+        cx: &mut Context<AppState>,
+    ) {
+        if let Some(existing) = self
+            .github_bindings
+            .iter_mut()
+            .find(|binding| binding.local_root == local_root)
+        {
+            existing.config = config;
+        } else {
+            self.github_bindings.push(GitHubSyncBinding { local_root, config });
+        }
+        self.github_sync_status = SyncStatus::Idle;
+        cx.notify();
+    }
+
+    pub fn clear_github_bindings(&mut self, cx: &mut Context<AppState>) {
+        self.github_bindings.clear();
+        self.github_sync_status = SyncStatus::Idle;
+        cx.notify();
     }
 
     /// Save to the current path (falls back to save_as if no path set).
