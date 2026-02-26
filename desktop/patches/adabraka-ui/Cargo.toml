@@ -623,6 +623,9 @@ version = "0.3"
 version = "0.3"
 package = "adabraka-gpui"
 
+[dependencies.octodocs-core]
+path = "../../crates/octodocs-core"
+
 [dependencies.isahc]
 version = "1.7"
 optional = true

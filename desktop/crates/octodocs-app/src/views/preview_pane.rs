@@ -244,6 +244,12 @@ fn render_inline(inline: &Inline, theme: &adabraka_ui::theme::Theme) -> AnyEleme
             .into_any_element(),
         Inline::Italic(t) => Text::new(t.clone())
             .into_any_element(),
+        Inline::Underline(t) => Text::new(t.clone())
+            .underline()
+            .into_any_element(),
+        Inline::Strikethrough(t) => Text::new(t.clone())
+            .strikethrough()
+            .into_any_element(),
         Inline::Code(t) => code_small(t.clone()).into_any_element(),
         Inline::Link { text, .. } => Text::new(text.clone())
             .color(theme.tokens.primary)

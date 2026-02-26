@@ -47,6 +47,8 @@ pub enum Inline {
     Text(String),
     Bold(String),
     Italic(String),
+    Underline(String),
+    Strikethrough(String),
     Code(String),
     Link { text: String, url: String },
     Image { alt: String, url: String },
@@ -136,6 +138,8 @@ impl Renderer {
         let mut code_buf = String::new();
         let mut bold = false;
         let mut italic = false;
+        let mut strikethrough = false;
+        let mut underline = false;
 
         for event in parser {
             match event {
@@ -201,6 +205,17 @@ impl Renderer {
                 Event::End(TagEnd::Strong) => bold = false,
                 Event::Start(Tag::Emphasis) => italic = true,
                 Event::End(TagEnd::Emphasis) => italic = false,
+                Event::Start(Tag::Strikethrough) => strikethrough = true,
+                Event::End(TagEnd::Strikethrough) => strikethrough = false,
+
+                Event::Html(html) => {
+                    let token = html.trim().to_lowercase();
+                    if token == "<u>" || token == "<ins>" {
+                        underline = true;
+                    } else if token == "</u>" || token == "</ins>" {
+                        underline = false;
+                    }
+                }
 
                 // ── Text ──────────────────────────────────────────
                 Event::Text(text) => {
@@ -214,6 +229,10 @@ impl Renderer {
                             Inline::Bold(s)
                         } else if italic {
                             Inline::Italic(s)
+                        } else if underline {
+                            Inline::Underline(s)
+                        } else if strikethrough {
+                            Inline::Strikethrough(s)
                         } else {
                             Inline::Text(s)
                         };

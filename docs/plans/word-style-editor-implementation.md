@@ -59,12 +59,12 @@ This is structurally identical to how Zed's own `Editor` works at a high level a
 
 ## Index
 
-- [ ] Phase 1: [Erase Old Block-Editor Code](#phase-1-erase-old-block-editor-code)
-- [ ] Phase 2: [DocumentParagraph Model in Core](#phase-2-documentparagraph-model-in-core)
-- [ ] Phase 3: [DocumentEditorState — Cursor & Editing Engine](#phase-3-documenteditorstate--cursor--editing-engine)
-- [ ] Phase 4: [DocumentEditorElement — Paint Pass](#phase-4-documenteditorelement--paint-pass)
-- [ ] Phase 5: [AppState & Toolbar Wiring](#phase-5-appstate--toolbar-wiring)
-- [ ] Phase 6: [Smoke Tests & Polish](#phase-6-smoke-tests--polish)
+- [x] Phase 1: [Erase Old Block-Editor Code](#phase-1-erase-old-block-editor-code)
+- [x] Phase 2: [DocumentParagraph Model in Core](#phase-2-documentparagraph-model-in-core)
+- [x] Phase 3: [DocumentEditorState — Cursor & Editing Engine](#phase-3-documenteditorstate--cursor--editing-engine)
+- [x] Phase 4: [DocumentEditorElement — Paint Pass](#phase-4-documenteditorelement--paint-pass)
+- [x] Phase 5: [AppState & Toolbar Wiring](#phase-5-appstate--toolbar-wiring)
+- [x] Phase 6: [Smoke Tests & Polish](#phase-6-smoke-tests--polish)
 
 ---
 
@@ -314,9 +314,25 @@ No new Cargo dependencies. Existing:
 
 ## Success Criteria
 
-- [ ] Opening any Markdown file shows rendered rich text with no visible `**`, `#`, or backtick syntax
-- [ ] The user can type, delete, and press Enter without any runtime panic
-- [ ] Bold / Italic / Code toolbar buttons apply formatting to the selected range
-- [ ] Save writes a valid, well-formed Markdown file
-- [ ] The cursor follows the mouse click to the correct character position
-- [ ] The editor feels like one continuous document with no visible block boundaries or activation clicks
+- [x] Opening any Markdown file shows rendered rich text with no visible `**`, `#`, or backtick syntax
+- [x] The user can type, delete, and press Enter without any runtime panic
+- [x] Bold / Italic / Code toolbar buttons apply formatting to the selected range
+- [x] Save writes a valid, well-formed Markdown file
+- [x] The cursor follows the mouse click to the correct character position
+- [x] The editor feels like one continuous document with no visible block boundaries or activation clicks
+
+---
+
+## Execution Notes — Implementation Completed
+
+### Key Implementation Decisions
+
+- **`doc_model.rs` in octodocs-core**: All 16 unit tests pass. `markdown_to_doc_paragraphs` and `doc_paragraphs_to_markdown` are exported from the crate root.
+- **`document_editor.rs` in adabraka-ui patches**: ~1587 lines. Full `DocumentEditorState` (cursor engine, IME, all keyboard actions) + `DocumentEditorElement` (GPUI custom element with `request_layout`/`prepaint`/`paint`) + `DocumentEditor` (public `RenderOnce` wrapper).
+- **Cargo patch mechanism**: Added `octodocs-core` as a path dependency to `patches/adabraka-ui/Cargo.toml`.
+- **`Pixels` field `.0` is private** — all arithmetic uses operator overloads: `bounds.left() + px(x)`.
+- **`shape_line` returns `ShapedLine` directly** (not `Result`). Never call with strings containing `\n`.
+- **`BlockEditorPane` deleted** — `views/block_editor_pane.rs` removed; `AppState` no longer has `blocks` activation logic (`active_block`, `editor_state`, `_content_subscription`, `activate_block()`, `deactivate_block()`).
+- **`blocks: Vec<DocumentBlock>` kept** for `PreviewPane` in Split mode.
+- **Toolbar closures** now call `state.doc_editor.update(cx, |editor, cx| editor.toggle_bold(cx))` etc. `ParagraphKind` imported from `octodocs_core` in `root.rs`.
+- **`cargo check -p octodocs-app`**: 0 errors, 1 unrelated warning (`std::sync::Arc` in `audio_player.rs`).

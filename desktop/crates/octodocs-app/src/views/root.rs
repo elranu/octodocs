@@ -4,10 +4,10 @@ use std::rc::Rc;
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
-use octodocs_core::FileIo;
+use octodocs_core::{FileIo, ParagraphKind};
 use octodocs_github::{get_stored_token, SyncStatus};
 
-use super::block_editor_pane::BlockEditorPane;
+use super::document_editor_pane::DocumentEditorPane;
 use super::editor_pane::EditorPane;
 use super::github_auth_modal::GithubAuthModal;
 use super::github_sidebar::GithubSidebar;
@@ -17,7 +17,7 @@ use crate::app_state::{AppState, PostAuthAction};
 
 pub struct RootView {
     app_state: Entity<AppState>,
-    block_editor_pane: Entity<BlockEditorPane>,
+    document_editor_pane: Entity<DocumentEditorPane>,
     editor_pane: Entity<EditorPane>,
     preview_pane: Entity<PreviewPane>,
     github_sidebar: Entity<GithubSidebar>,
@@ -31,7 +31,7 @@ pub struct RootView {
 impl RootView {
     pub fn new(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
         let app_state = cx.new(|cx| AppState::new(cx));
-        let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
+        let document_editor_pane = cx.new(|_| DocumentEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
         let github_sidebar = cx.new(|cx| GithubSidebar::new(app_state.clone(), cx));
@@ -49,12 +49,12 @@ impl RootView {
         });
 
         // Re-render when AppState changes (content/block/mode changes).
-        let pane_bep = block_editor_pane.clone();
+        let pane_dep = document_editor_pane.clone();
         let pane_ep = editor_pane.clone();
         let pane_pp = preview_pane.clone();
         let pane_sb = github_sidebar.clone();
         let subscription = cx.observe(&app_state, move |_, _, cx| {
-            pane_bep.update(cx, |_, cx| cx.notify());
+            pane_dep.update(cx, |_, cx| cx.notify());
             pane_ep.update(cx, |_, cx| cx.notify());
             pane_pp.update(cx, |_, cx| cx.notify());
             pane_sb.update(cx, |_, cx| cx.notify());
@@ -69,9 +69,7 @@ impl RootView {
             repo_modal_clone.update(cx, |_, cx| cx.notify());
         });
 
-        // editor_weak targets the shared block editor — toolbar actions operate
-        // on whichever block is currently active.
-        let editor_weak = app_state.read(cx).editor_state.downgrade();
+        // toolbar actions operate on the single doc_editor entity.
         let app_weak = app_state.downgrade();
 
         let aw = app_weak.clone();
@@ -104,29 +102,57 @@ impl RootView {
             let _ = aw.update(cx, |state, cx| state.save_as(cx));
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let bold_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("**", "**", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_bold(cx));
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let italic_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("*", "*", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_italic(cx));
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let code_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("`", "`", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_code(cx));
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
+        let underline_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_underline(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let strike_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_strikethrough(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
         let h1_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.insert_text("# ", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| {
+                    editor.set_paragraph_kind(ParagraphKind::Heading(1), cx);
+                });
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let h2_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.insert_text("## ", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| {
+                    editor.set_paragraph_kind(ParagraphKind::Heading(2), cx);
+                });
+            });
         };
 
         let is_dark = Rc::new(Cell::new(initial_is_dark));
@@ -199,6 +225,16 @@ impl RootView {
                                 .tooltip("Italic (Ctrl+I)")
                                 .on_click(italic_h),
                         )
+                        .button(
+                            ToolbarButton::new("underline", IconSource::Named("underline".into()))
+                                .tooltip("Underline")
+                                .on_click(underline_h),
+                        )
+                        .button(
+                            ToolbarButton::new("strikethrough", IconSource::Named("strikethrough".into()))
+                                .tooltip("Strikethrough")
+                                .on_click(strike_h),
+                        )
                         .separator()
                         .button(
                             ToolbarButton::new("h1", IconSource::Named("heading-1".into()))
@@ -256,7 +292,7 @@ impl RootView {
 
         Self {
             app_state,
-            block_editor_pane,
+            document_editor_pane,
             editor_pane,
             preview_pane,
             github_sidebar,
@@ -425,7 +461,7 @@ impl Render for RootView {
                 .flex()
                 .flex_grow()
                 .min_h_0()
-                .child(self.block_editor_pane.clone())
+                .child(self.document_editor_pane.clone())
                 .into_any_element(),
             crate::app_state::ViewMode::Source => div()
                 .flex()
