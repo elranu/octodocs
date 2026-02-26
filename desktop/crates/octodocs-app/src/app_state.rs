@@ -65,6 +65,8 @@ pub struct AppState {
     pub github_bindings: Vec<GitHubSyncBinding>,
     /// Runtime status of GitHub autosync.
     pub github_sync_status: SyncStatus,
+    /// Last local file path that successfully synced to GitHub.
+    pub last_synced_path: Option<PathBuf>,
     /// Whether the GitHub sidebar is open.
     pub sidebar_open: bool,
     /// Whether the GitHub auth modal is open.
@@ -148,6 +150,64 @@ impl AppState {
         let _ = std::fs::write(path, body);
     }
 
+    fn ui_state_store_path() -> Option<PathBuf> {
+        let base = dirs::config_dir()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?;
+        Some(base.join("octodocs").join("ui_state.tsv"))
+    }
+
+    fn load_ui_state_from_disk() -> (Option<usize>, Option<PathBuf>) {
+        let Some(path) = Self::ui_state_store_path() else {
+            return (None, None);
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return (None, None);
+        };
+
+        let mut active_binding_idx = None;
+        let mut last_opened_file = None;
+
+        for line in content.lines() {
+            let mut parts = line.splitn(2, '\t');
+            let key = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default();
+            match key {
+                "active_binding_idx" => {
+                    active_binding_idx = value.parse::<usize>().ok();
+                }
+                "last_opened_file" => {
+                    if !value.is_empty() {
+                        last_opened_file = Some(PathBuf::from(value));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (active_binding_idx, last_opened_file)
+    }
+
+    fn persist_ui_state_to_disk(&self) {
+        let Some(path) = Self::ui_state_store_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+
+        let mut lines = Vec::new();
+        if let Some(idx) = self.active_binding_idx {
+            lines.push(format!("active_binding_idx\t{idx}"));
+        }
+        if let Some(doc_path) = self.document.path.as_ref() {
+            lines.push(format!("last_opened_file\t{}", doc_path.display()));
+        }
+
+        let _ = std::fs::write(path, lines.join("\n"));
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let default_content = "# Welcome to OctoDocs\n\nStart typing **Markdown** here and watch the preview update live.\n\n## Features\n\n- Live preview\n- Open, save, and create `.md` files\n- Mermaid diagram support\n\n## Example\n\n> This is a blockquote.\n\n```mermaid\ngraph TD\n    A[Start] --> B[Edit Markdown]\n    B --> C[Preview updates]\n```\n";
 
@@ -188,13 +248,31 @@ impl AppState {
             }
         });
 
-        let blocks = Renderer::parse_blocks(default_content);
-
         let github_bindings = Self::load_github_bindings_from_disk();
-        let active_binding_idx = if github_bindings.is_empty() { None } else { Some(0) };
+        let (saved_active_binding_idx, saved_last_opened_file) = Self::load_ui_state_from_disk();
+
+        let mut document = Document::with_content(default_content);
+        if let Some(path) = saved_last_opened_file {
+            if let Ok(doc) = octodocs_core::FileIo::open(&path) {
+                document = doc;
+            }
+        }
+        let blocks = Renderer::parse_blocks(&document.content);
+
+        let active_binding_idx = if github_bindings.is_empty() {
+            None
+        } else if let Some(saved_idx) = saved_active_binding_idx {
+            if saved_idx < github_bindings.len() {
+                Some(saved_idx)
+            } else {
+                Some(github_bindings.len() - 1)
+            }
+        } else {
+            Some(github_bindings.len() - 1)
+        };
 
         Self {
-            document: Document::with_content(default_content),
+            document,
             blocks,
             active_block: None,
             dirty: false,
@@ -203,7 +281,8 @@ impl AppState {
             full_editor_state,
             github_bindings,
             github_sync_status: SyncStatus::Idle,
-            sidebar_open: false,
+            last_synced_path: None,
+            sidebar_open: true,
             auth_modal_open: false,
             repo_add_modal_open: false,
             active_binding_idx,
@@ -271,6 +350,7 @@ impl AppState {
         self.active_block = None;
         self.dirty = false;
         self.github_sync_status = SyncStatus::Idle;
+        self.last_synced_path = None;
         self.sidebar_open = false;
         self.auth_modal_open = false;
         self.repo_add_modal_open = false;
@@ -286,6 +366,14 @@ impl AppState {
     pub fn toggle_sidebar(&mut self, cx: &mut Context<AppState>) {
         self.sidebar_open = !self.sidebar_open;
         cx.notify();
+    }
+
+    pub fn set_active_binding_idx(&mut self, idx: usize, cx: &mut Context<AppState>) {
+        if idx < self.github_bindings.len() {
+            self.active_binding_idx = Some(idx);
+            self.persist_ui_state_to_disk();
+            cx.notify();
+        }
     }
 
     pub fn open_file_from_sidebar(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
@@ -324,7 +412,7 @@ impl AppState {
         }
         self.document = doc;
         self.dirty = false;
-        self.github_sync_status = SyncStatus::Idle;
+        self.persist_ui_state_to_disk();
         cx.notify();
     }
 
@@ -351,13 +439,14 @@ impl AppState {
 
         let config = binding.config.clone();
 
-        let Some(filename) = path.file_name().and_then(|f| f.to_str()).map(|f| f.to_string()) else {
+        let Some(filename) = Self::relative_sync_path(binding, path) else {
             self.github_sync_status = SyncStatus::Failed {
-                message: "Invalid local filename for sync".to_string(),
+                message: "Invalid local path for sync".to_string(),
             };
             cx.notify();
             return;
         };
+        let syncing_local_path = path.clone();
 
         let token = match octodocs_github::get_stored_token() {
             Ok(Some(token)) => token,
@@ -398,6 +487,9 @@ impl AppState {
                         message: err.to_string(),
                     },
                 };
+                if matches!(state.github_sync_status, SyncStatus::Success { .. }) {
+                    state.last_synced_path = Some(syncing_local_path.clone());
+                }
                 cx.notify();
             });
         }));
@@ -408,6 +500,70 @@ impl AppState {
             .iter()
             .filter(|binding| doc_path.starts_with(&binding.local_root))
             .max_by_key(|binding| binding.local_root.components().count())
+    }
+
+    fn relative_sync_path(binding: &GitHubSyncBinding, doc_path: &Path) -> Option<String> {
+        let rel = doc_path.strip_prefix(&binding.local_root).ok()?;
+        let path = rel.to_string_lossy().replace('\\', "/");
+        let trimmed = path.trim_start_matches('/').to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+
+    pub fn sync_rename_to_github(&mut self, old_path: PathBuf, new_path: PathBuf, cx: &mut Context<AppState>) {
+        let Some(binding) = self.find_sync_binding(&new_path) else {
+            return;
+        };
+
+        let Some(old_filename) = Self::relative_sync_path(binding, &old_path) else {
+            return;
+        };
+        let Some(new_filename) = Self::relative_sync_path(binding, &new_path) else {
+            return;
+        };
+
+        let token = match octodocs_github::get_stored_token() {
+            Ok(Some(token)) => token,
+            _ => return,
+        };
+
+        let config = binding.config.clone();
+        let content = match std::fs::read_to_string(&new_path) {
+            Ok(content) => content,
+            Err(_) => return,
+        };
+
+        self.github_sync_status = SyncStatus::Syncing;
+        cx.notify();
+
+        self._sync_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let _ = octodocs_github::delete_file(&token, &config, &old_filename);
+                    octodocs_github::push_file(&token, &config, &new_filename, &content)
+                })
+                .await;
+
+            let _ = this.update(cx, |state, cx| {
+                state.github_sync_status = match result {
+                    Ok(sha) => SyncStatus::Success {
+                        committed_at: SystemTime::now(),
+                        sha,
+                    },
+                    Err(err) => SyncStatus::Failed {
+                        message: err.to_string(),
+                    },
+                };
+                if matches!(state.github_sync_status, SyncStatus::Success { .. }) {
+                    state.last_synced_path = Some(new_path.clone());
+                }
+                cx.notify();
+            });
+        }));
     }
 
     pub fn upsert_github_binding(
@@ -429,6 +585,7 @@ impl AppState {
             self.active_binding_idx = Some(0);
         }
         self.persist_github_bindings_to_disk();
+        self.persist_ui_state_to_disk();
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
     }
@@ -437,6 +594,7 @@ impl AppState {
         self.github_bindings.clear();
         self.active_binding_idx = None;
         self.persist_github_bindings_to_disk();
+        self.persist_ui_state_to_disk();
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
     }
@@ -469,6 +627,7 @@ impl AppState {
                 Ok(_) => {
                     self.document.path = Some(path);
                     self.dirty = false;
+                    self.persist_ui_state_to_disk();
                     self.trigger_github_sync(cx);
                     cx.notify();
                 }

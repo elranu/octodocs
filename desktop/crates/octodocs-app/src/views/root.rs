@@ -143,11 +143,22 @@ impl RootView {
         let github_auth_modal_weak = github_auth_modal.downgrade();
         let aw_github = app_weak.clone();
         let github_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = aw_github.update(cx, |state, cx| {
-                state.auth_modal_open = true;
-                cx.notify();
-            });
-            let _ = github_auth_modal_weak.update(cx, |modal, cx| modal.init(cx));
+            match get_stored_token() {
+                Ok(Some(_)) => {
+                    let _ = aw_github.update(cx, |state, cx| {
+                        state.repo_add_modal_open = true;
+                        state.auth_modal_open = false;
+                        cx.notify();
+                    });
+                }
+                _ => {
+                    let _ = aw_github.update(cx, |state, cx| {
+                        state.auth_modal_open = true;
+                        cx.notify();
+                    });
+                    let _ = github_auth_modal_weak.update(cx, |modal, cx| modal.init(cx));
+                }
+            }
         };
 
         let aw_sidebar = app_weak.clone();
@@ -262,6 +273,12 @@ impl Render for RootView {
         let show_unsaved_prompt = app.show_unsaved_prompt;
         let github_sync_status = app.github_sync_status.clone();
         let github_sync_configured = !app.github_bindings.is_empty();
+        let current_doc_path = app.document.path.clone();
+        let has_unsynced_changes = app.dirty && app.document.path.is_some();
+        let current_file_synced = match (app.document.path.as_ref(), app.last_synced_path.as_ref()) {
+            (Some(current), Some(last)) => current == last,
+            _ => false,
+        };
         drop(app);
 
         if repo_add_modal_open {
@@ -298,17 +315,25 @@ impl Render for RootView {
                 .items_center()
                 .gap(px(4.0))
                 .child(
-                    if github_sync_configured {
+                    if !github_sync_configured {
+                        Icon::new(IconSource::Named("cloud-off".into())).size_3().color(theme.tokens.muted_foreground)
+                    } else if has_unsynced_changes {
+                        Icon::new(IconSource::Named("alert-circle".into())).size_3().color(theme.tokens.destructive)
+                    } else if current_file_synced {
                         Icon::new(IconSource::Named("cloud".into())).size_3().color(theme.tokens.primary)
                     } else {
-                        Icon::new(IconSource::Named("cloud-off".into())).size_3().color(theme.tokens.muted_foreground)
+                        Icon::new(IconSource::Named("cloud".into())).size_3().color(theme.tokens.muted_foreground)
                     }
                 )
                 .child(
-                    if github_sync_configured {
-                        body_small("Configured").color(theme.tokens.primary)
-                    } else {
+                    if !github_sync_configured {
                         body_small("Not configured").color(theme.tokens.muted_foreground)
+                    } else if has_unsynced_changes {
+                        body_small("Unsynced changes").color(theme.tokens.destructive)
+                    } else if current_file_synced {
+                        body_small("Synced").color(theme.tokens.primary)
+                    } else {
+                        body_small("Ready to sync").color(theme.tokens.muted_foreground)
                     }
                 )
                 .into_any_element(),
@@ -324,7 +349,15 @@ impl Render for RootView {
                 .items_center()
                 .gap(px(4.0))
                 .child(Icon::new(IconSource::Named("check".into())).size_3().color(theme.tokens.primary))
-                .child(body_small("Synced").color(theme.tokens.primary))
+                .child(
+                    if current_file_synced {
+                        body_small("Synced").color(theme.tokens.primary)
+                    } else if current_doc_path.is_some() {
+                        body_small("Synced (other file)").color(theme.tokens.muted_foreground)
+                    } else {
+                        body_small("Synced").color(theme.tokens.primary)
+                    }
+                )
                 .into_any_element(),
             SyncStatus::Failed { message: _ } => div()
                 .flex()

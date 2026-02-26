@@ -58,6 +58,26 @@ pub struct RepoAddModal {
 }
 
 impl RepoAddModal {
+    fn confirm_default_for_empty_repo(&mut self, repo: RepoInfo, cx: &mut Context<Self>) {
+        self.selected_local_root = self
+            .app_state
+            .read(cx)
+            .document
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+
+        self.state = WizardState::Confirm {
+            config: GitHubSyncConfig {
+                owner: repo.owner,
+                repo: repo.name,
+                branch: "main".to_string(),
+                folder: String::new(),
+            },
+        };
+        cx.notify();
+    }
+
     pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let repo_search_input = cx.new(|cx| InputState::new(cx).placeholder("Search repositories..."));
 
@@ -76,7 +96,7 @@ impl RepoAddModal {
     }
 
     pub fn set_auth_token(&mut self, auth_token: String, cx: &mut Context<Self>) {
-        if self.auth_token == auth_token && self.initialized {
+        if self.auth_token == auth_token {
             return;
         }
         self.auth_token = auth_token;
@@ -147,6 +167,11 @@ impl RepoAddModal {
 
             let _ = weak.update(cx, |modal, cx| match branches {
                 Ok(branches) => {
+                    if branches.is_empty() {
+                        modal.confirm_default_for_empty_repo(repo, cx);
+                        return;
+                    }
+
                     modal.state = WizardState::BranchSelect {
                         repo,
                         branches,
@@ -155,10 +180,18 @@ impl RepoAddModal {
                     cx.notify();
                 }
                 Err(e) => {
-                    modal.state = WizardState::Error {
-                        message: format!("Failed to load branches: {e}"),
-                    };
-                    cx.notify();
+                    let message = e.to_string().to_ascii_lowercase();
+                    if message.contains("409")
+                        || message.contains("empty")
+                        || message.contains("no commits")
+                    {
+                        modal.confirm_default_for_empty_repo(repo, cx);
+                    } else {
+                        modal.state = WizardState::Error {
+                            message: format!("Failed to load branches: {e}"),
+                        };
+                        cx.notify();
+                    }
                 }
             });
         }));
@@ -338,7 +371,7 @@ impl RepoAddModal {
 
         self.app_state.update(cx, |state, cx| {
             state.upsert_github_binding(local_root, config, cx);
-            state.active_binding_idx = state
+            let selected_idx = state
                 .github_bindings
                 .iter()
                 .position(|binding| {
@@ -348,6 +381,9 @@ impl RepoAddModal {
                         && binding.config.branch == config_for_index.branch
                         && binding.config.folder == config_for_index.folder
                 });
+            if let Some(idx) = selected_idx {
+                state.set_active_binding_idx(idx, cx);
+            }
             state.repo_add_modal_open = false;
             cx.notify();
         });

@@ -3,8 +3,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::components::input::Input;
 use adabraka_ui::components::input_state::InputState;
+use adabraka_ui::overlays::context_menu::{
+    ContextMenu as OverlayContextMenu, ContextMenuItem as OverlayContextMenuItem,
+};
 use adabraka_ui::prelude::*;
 use octodocs_github::get_stored_token;
 
@@ -34,6 +38,11 @@ pub struct GithubSidebar {
     repo_dropdown_open: bool,
     expanded_dirs: HashSet<PathBuf>,
     focused_dir: Option<PathBuf>,
+    selected_file: Option<PathBuf>,
+    file_context_menu: Option<(PathBuf, Point<Pixels>)>,
+    rename_target: Option<PathBuf>,
+    rename_input: Entity<InputState>,
+    delete_target: Option<PathBuf>,
     create_target: Option<CreateTarget>,
     create_input: Entity<InputState>,
 }
@@ -41,14 +50,143 @@ pub struct GithubSidebar {
 impl GithubSidebar {
     pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let create_input = cx.new(|cx| InputState::new(cx).placeholder("name"));
+        let rename_input = cx.new(|cx| InputState::new(cx).placeholder("name"));
         Self {
             app_state,
             repo_dropdown_open: false,
             expanded_dirs: HashSet::new(),
             focused_dir: None,
+            selected_file: None,
+            file_context_menu: None,
+            rename_target: None,
+            rename_input,
+            delete_target: None,
             create_target: None,
             create_input,
         }
+    }
+
+    fn begin_rename_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("untitled")
+            .to_string();
+        self.rename_input = cx.new(|cx| {
+            let mut input = InputState::new(cx).placeholder("name");
+            input.content = stem.into();
+            input
+        });
+        self.rename_target = Some(path);
+        self.file_context_menu = None;
+        cx.notify();
+    }
+
+    fn complete_rename_file(&mut self, value: SharedString, cx: &mut Context<Self>) {
+        let Some(target) = self.rename_target.clone() else {
+            return;
+        };
+
+        let raw = value.trim();
+        if raw.is_empty() {
+            return;
+        }
+
+        let stem = Path::new(raw)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("untitled");
+
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("md");
+        let new_path = target.with_file_name(format!("{stem}.{ext}"));
+
+        if new_path != target {
+            if let Err(err) = std::fs::rename(&target, &new_path) {
+                eprintln!("Rename error: {err}");
+                return;
+            }
+
+            if self.selected_file.as_ref() == Some(&target) {
+                self.selected_file = Some(new_path.clone());
+            }
+
+            self.app_state.update(cx, |state, cx| {
+                if state.document.path.as_ref() == Some(&target) {
+                    state.document.path = Some(new_path.clone());
+                }
+                state.sync_rename_to_github(target.clone(), new_path.clone(), cx);
+                cx.notify();
+            });
+        }
+
+        self.rename_target = None;
+        cx.notify();
+    }
+
+    fn duplicate_file(&mut self, source: PathBuf, cx: &mut Context<Self>) {
+        let stem = source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("copy")
+            .to_string();
+        let ext = source
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("md")
+            .to_string();
+        let parent = source
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let mut candidate = parent.join(format!("{stem} copy.{ext}"));
+        let mut idx = 2usize;
+        while candidate.exists() {
+            candidate = parent.join(format!("{stem} copy {idx}.{ext}"));
+            idx += 1;
+        }
+
+        if let Err(err) = std::fs::copy(&source, &candidate) {
+            eprintln!("Duplicate error: {err}");
+            return;
+        }
+
+        self.selected_file = Some(candidate.clone());
+        self.begin_rename_file(candidate, cx);
+    }
+
+    fn confirm_delete_file(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.delete_target.clone() else {
+            return;
+        };
+
+        if let Err(err) = std::fs::remove_file(&target) {
+            eprintln!("Delete error: {err}");
+            return;
+        }
+
+        if self.selected_file.as_ref() == Some(&target) {
+            self.selected_file = None;
+        }
+        if self.rename_target.as_ref() == Some(&target) {
+            self.rename_target = None;
+        }
+
+        self.app_state.update(cx, |state, cx| {
+            if state.document.path.as_ref() == Some(&target) {
+                state.document.path = None;
+                state.dirty = true;
+            }
+            cx.notify();
+        });
+
+        self.delete_target = None;
+        self.file_context_menu = None;
+        cx.notify();
     }
 
     fn active_index(&self, bindings_len: usize, active_binding_idx: Option<usize>) -> Option<usize> {
@@ -77,13 +215,15 @@ impl GithubSidebar {
             return;
         }
 
-        let mut name = raw_name.to_string();
+        let name = raw_name.to_string();
         let full_path = match target.kind {
             CreateKind::File => {
-                if !name.to_ascii_lowercase().ends_with(".md") {
-                    name.push_str(".md");
-                }
-                target.parent.join(name)
+                let stem = std::path::Path::new(&name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("untitled");
+                target.parent.join(format!("{stem}.md"))
             }
             CreateKind::Folder => target.parent.join(name),
         };
@@ -200,33 +340,80 @@ impl GithubSidebar {
                 let path = entry.path.clone();
                 let name = entry.name.clone();
                 let row_weak = weak.clone();
+                let right_click_weak = weak.clone();
+                let path_for_left = path.clone();
+                let path_for_right = path.clone();
                 let indent = depth as f32 * 12.0;
+                let is_renaming = self.rename_target.as_ref() == Some(&path);
+                let is_selected = self.selected_file.as_ref() == Some(&path);
 
-                rows.push(
-                    div()
-                        .pl(px(indent + 12.0))
-                        .pr(px(6.0))
-                        .py(px(4.0))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.tokens.accent))
-                        .rounded(px(6.0))
-                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                            let _ = row_weak.update(cx, |sidebar, cx| {
-                                sidebar.app_state.update(cx, |state, cx| {
-                                    state.open_file_from_sidebar(path.clone(), cx);
+                if is_renaming {
+                    let rename_weak = weak.clone();
+                    let cancel_weak = weak.clone();
+                    rows.push(
+                        div()
+                            .pl(px(indent + 12.0))
+                            .pr(px(6.0))
+                            .py(px(4.0))
+                            .child(
+                                Input::new(&self.rename_input)
+                                    .placeholder("new name")
+                                    .on_enter(move |value, cx| {
+                                        let _ = rename_weak.update(cx, |sidebar, cx| {
+                                            sidebar.complete_rename_file(value, cx);
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("cancel-rename-file", "Cancel")
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ButtonSize::Sm)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = cancel_weak.update(cx, |sidebar, cx| {
+                                            sidebar.rename_target = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .into_any_element(),
+                    );
+                } else {
+                    rows.push(
+                        div()
+                            .pl(px(indent + 12.0))
+                            .pr(px(6.0))
+                            .py(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.tokens.accent))
+                            .when(is_selected, |s| s.bg(theme.tokens.accent.opacity(0.35)))
+                            .rounded(px(6.0))
+                            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                                let _ = row_weak.update(cx, |sidebar, cx| {
+                                    sidebar.selected_file = Some(path_for_left.clone());
+                                    sidebar.app_state.update(cx, |state, cx| {
+                                        state.open_file_from_sidebar(path_for_left.clone(), cx);
+                                    });
                                 });
-                            });
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                            .child(Icon::new(IconSource::Named("file".into())).size_3())
-                                .child(body_small(name)),
-                        )
-                        .into_any_element(),
-                );
+                            })
+                            .on_mouse_down(gpui::MouseButton::Right, move |event, _, cx| {
+                                let click_position = event.position;
+                                let _ = right_click_weak.update(cx, |sidebar, cx| {
+                                    sidebar.selected_file = Some(path_for_right.clone());
+                                    sidebar.file_context_menu = Some((path_for_right.clone(), click_position));
+                                    cx.notify();
+                                });
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(Icon::new(IconSource::Named("file".into())).size_3())
+                                    .child(body_small(name)),
+                            )
+                            .into_any_element(),
+                    );
+                }
             }
         }
     }
@@ -247,8 +434,7 @@ impl GithubSidebar {
 
     fn set_active_binding(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.app_state.update(cx, |state, cx| {
-            state.active_binding_idx = Some(idx);
-            cx.notify();
+            state.set_active_binding_idx(idx, cx);
         });
         let selected_root = self
             .app_state
@@ -303,16 +489,14 @@ impl Render for GithubSidebar {
             );
 
             let toggle_weak = weak.clone();
-            let add_weak = weak.clone();
 
             let selector = div()
                 .flex()
                 .items_center()
-                .gap(px(8.0))
                 .child(
                     div()
                         .flex()
-                        .flex_1()
+                        .w_full()
                         .items_center()
                         .justify_between()
                         .px(px(10.0))
@@ -330,14 +514,6 @@ impl Render for GithubSidebar {
                         })
                         .child(body_small(active_label))
                         .child(Icon::new(IconSource::Named("chevron-down".into())).size_3()),
-                )
-                .child(
-                        IconButton::new(IconSource::Named("plus".into()))
-                        .size(px(28.0))
-                        .variant(ButtonVariant::Ghost)
-                        .on_click(move |_, _w, cx| {
-                            let _ = add_weak.update(cx, |sidebar, cx| sidebar.open_add_repo_flow(cx));
-                        }),
                 );
 
             let dropdown = if self.repo_dropdown_open {
@@ -375,6 +551,107 @@ impl Render for GithubSidebar {
         };
 
         let add_weak = weak.clone();
+        let context_menu_overlay: AnyElement = if let Some((target_path, click_position)) = self.file_context_menu.clone() {
+            let rename_weak = weak.clone();
+            let duplicate_weak = weak.clone();
+            let delete_weak = weak.clone();
+            let close_weak = weak.clone();
+            let target_for_rename = target_path.clone();
+            let target_for_duplicate = target_path.clone();
+            let target_for_delete = target_path.clone();
+
+            OverlayContextMenu::new(click_position)
+                .items(vec![
+                    OverlayContextMenuItem::new("rename-file", "Rename")
+                        .on_click(move |_, cx| {
+                            let _ = rename_weak.update(cx, |sidebar, cx| {
+                                sidebar.begin_rename_file(target_for_rename.clone(), cx);
+                            });
+                        }),
+                    OverlayContextMenuItem::new("duplicate-file", "Duplicate")
+                        .on_click(move |_, cx| {
+                            let _ = duplicate_weak.update(cx, |sidebar, cx| {
+                                sidebar.duplicate_file(target_for_duplicate.clone(), cx);
+                            });
+                        }),
+                    OverlayContextMenuItem::separator(),
+                    OverlayContextMenuItem::new("delete-file", "Delete")
+                        .on_click(move |_, cx| {
+                            let _ = delete_weak.update(cx, |sidebar, cx| {
+                                sidebar.delete_target = Some(target_for_delete.clone());
+                                sidebar.file_context_menu = None;
+                                cx.notify();
+                            });
+                        }),
+                ])
+                .on_close(move |_, cx| {
+                    let _ = close_weak.update(cx, |sidebar, cx| {
+                        sidebar.file_context_menu = None;
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+        let delete_confirm_overlay: AnyElement = if self.delete_target.is_some() {
+            let confirm_weak = weak.clone();
+            let cancel_weak = weak.clone();
+            let cancel_weak_backdrop = cancel_weak.clone();
+
+            ModalDialog::new()
+                .width(px(380.0))
+                .on_backdrop_click(move |_, cx| {
+                    let _ = cancel_weak_backdrop.update(cx, |sidebar, cx| {
+                        sidebar.delete_target = None;
+                        cx.notify();
+                    });
+                })
+                .header(
+                    div()
+                        .p(px(14.0))
+                        .border_b_1()
+                        .border_color(theme.tokens.border)
+                        .child(h5("Delete File")),
+                )
+                .content(
+                    div()
+                        .p(px(14.0))
+                        .child(body("Are you sure you want to delete this file?")),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .p(px(12.0))
+                        .border_t_1()
+                        .border_color(theme.tokens.border)
+                        .child(
+                            Button::new("cancel-delete-file", "Cancel")
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    let _ = cancel_weak.update(cx, |sidebar, cx| {
+                                        sidebar.delete_target = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("confirm-delete-file", "Delete")
+                                .variant(ButtonVariant::Destructive)
+                                .on_click(move |_, _, cx| {
+                                    let _ = confirm_weak.update(cx, |sidebar, cx| {
+                                        sidebar.confirm_delete_file(cx);
+                                    });
+                                }),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
 
         let file_explorer: AnyElement = if let Some(active) = active_idx {
             let local_root = bindings[active].local_root.clone();
@@ -448,28 +725,19 @@ impl Render for GithubSidebar {
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(body_small("Files"))
-                        .child(
-                            body_small(current_folder_name)
-                                .color(theme.tokens.muted_foreground),
-                        ),
-                )
-                .child(div().mt(px(8.0)).flex().flex_col().gap(px(2.0)).children(rows))
-                .child(
-                    div()
-                        .mt(px(10.0))
-                        .pt(px(8.0))
-                        .border_t_1()
-                        .border_color(theme.tokens.border)
-                        .flex()
                         .gap(px(8.0))
                         .child(
-                            Button::new("new-md-file", "+ New File")
-                                .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::Sm)
-                                .on_click(move |_, _w, cx| {
+                            div()
+                                .id("new-md-file")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.tokens.accent))
+                                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                     let _ = new_file_weak.update(cx, |sidebar, cx| {
                                         sidebar.begin_create(
                                             CreateKind::File,
@@ -480,13 +748,22 @@ impl Render for GithubSidebar {
                                             cx,
                                         );
                                     });
-                                }),
+                                })
+                                .child(Icon::new(IconSource::Named("file".into())).size_3())
+                                .child(body_small("New File")),
                         )
                         .child(
-                            Button::new("new-folder", "+ Folder")
-                                .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::Sm)
-                                .on_click(move |_, _w, cx| {
+                            div()
+                                .id("new-folder")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.tokens.accent))
+                                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                     let _ = new_folder_weak.update(cx, |sidebar, cx| {
                                         sidebar.begin_create(
                                             CreateKind::Folder,
@@ -497,9 +774,24 @@ impl Render for GithubSidebar {
                                             cx,
                                         );
                                     });
-                                }),
+                                })
+                                .child(Icon::new(IconSource::Named("folder".into())).size_3())
+                                .child(body_small("New Folder")),
                         ),
                 )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(body_small("Files"))
+                        .child(
+                            body_small(current_folder_name)
+                                .color(theme.tokens.muted_foreground),
+                        ),
+                )
+                .child(div().mt(px(8.0)).flex().flex_col().gap(px(2.0)).children(rows))
                 .child(creation_input)
                 .into_any_element()
         } else {
@@ -545,5 +837,7 @@ impl Render for GithubSidebar {
             )
             .child(repo_selector)
             .child(file_explorer)
+            .child(context_menu_overlay)
+            .child(delete_confirm_overlay)
     }
 }
