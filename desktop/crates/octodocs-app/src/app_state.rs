@@ -156,6 +156,19 @@ impl AppState {
     /// Activate inline editing for block at `idx`.
     pub fn activate_block(&mut self, idx: usize, cx: &mut Context<AppState>) {
         if idx >= self.blocks.len() { return; }
+
+        // If this block is already active, don't re-create the editor state —
+        // just re-focus it so the cursor reappears after an outside click.
+        if self.active_block == Some(idx) {
+            if let Some(rb) = &self.active_rich_block {
+                rb.update(cx, |s, cx| {
+                    s.needs_focus = true;
+                    cx.notify();
+                });
+            }
+            return;
+        }
+
         self.active_block = Some(idx);
 
         // Load into legacy editor (still used as fallback).

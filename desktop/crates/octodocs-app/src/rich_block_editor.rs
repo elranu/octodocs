@@ -106,6 +106,9 @@ pub struct RichBlockState {
     pub font_size: Pixels,
     pub split_requested: Option<SpanCursor>,
     pub merge_prev_requested: bool,
+    /// Set to `true` when a block is first activated so `RichBlockEditor::render`
+    /// can call `window.focus()` on the first paint after activation.
+    pub needs_focus: bool,
 }
 
 impl RichBlockState {
@@ -122,6 +125,7 @@ impl RichBlockState {
             font_size: px(16.0),
             split_requested: None,
             merge_prev_requested: false,
+            needs_focus: true,
         }
     }
 
@@ -149,6 +153,7 @@ impl RichBlockState {
         self.selection = None;
         self.split_requested = None;
         self.merge_prev_requested = false;
+        self.needs_focus = true;
         cx.notify();
     }
 
@@ -1089,6 +1094,16 @@ impl RichBlockEditor {
 impl RenderOnce for RichBlockEditor {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = self.state.clone();
+
+        // Auto-focus on the first render after a block is activated.
+        // We check and clear `needs_focus` without calling cx.notify() to avoid
+        // an infinite re-render loop.
+        if state.read(cx).needs_focus {
+            let handle = state.read(cx).focus_handle.clone();
+            window.focus(&handle);
+            state.update(cx, |s, _| s.needs_focus = false);
+        }
+
         div()
             .id(("rich-block-editor", state.entity_id()))
             .key_context("RichBlockEditor")
