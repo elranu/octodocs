@@ -2,8 +2,10 @@ use std::time::SystemTime;
 
 use adabraka_ui::prelude::*;
 use gpui::{Subscription, Task};
-use octodocs_core::{Document, DocumentBlock, Renderer};
+use octodocs_core::{Document, DocumentBlock, RichBlock, Renderer};
 use octodocs_github::{GitHubSyncConfig, SyncStatus};
+
+use crate::rich_block_editor::{RichBlockState, SpanCursor, SpanFormatToggle};
 
 /// Which content layout the user is currently viewing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,8 @@ pub struct AppState {
     pub editor_state: Entity<adabraka_ui::components::editor::EditorState>,
     /// Full-document editor for Source and Split modes.
     pub full_editor_state: Entity<adabraka_ui::components::editor::EditorState>,
+    /// Rich block editor state for the currently active block (WYSIWYG mode).
+    pub active_rich_block: Option<Entity<RichBlockState>>,
     /// Optional GitHub destination for autosync.
     pub github_config: Option<GitHubSyncConfig>,
     /// Runtime status of GitHub autosync.
@@ -58,6 +62,7 @@ pub struct AppState {
     _sync_task: Option<Task<()>>,
     _content_subscription: Subscription,
     _full_content_subscription: Subscription,
+    _rich_block_subscription: Option<Subscription>,
 }
 
 impl AppState {
@@ -111,12 +116,14 @@ impl AppState {
             view_mode: ViewMode::Wysiwyg,
             editor_state,
             full_editor_state,
+            active_rich_block: None,
             github_config: None,
             github_sync_status: SyncStatus::Idle,
             github_panel_open: false,
             _sync_task: None,
             _content_subscription: subscription,
             _full_content_subscription: full_subscription,
+            _rich_block_subscription: None,
         }
     }
 
@@ -154,17 +161,69 @@ impl AppState {
     pub fn activate_block(&mut self, idx: usize, cx: &mut Context<AppState>) {
         if idx >= self.blocks.len() { return; }
         self.active_block = Some(idx);
+
+        // Load into legacy editor (still used as fallback).
         let src = self.blocks[idx].source.trim_end().to_string();
         self.editor_state.update(cx, |state, cx| {
             state.set_content(&src, cx);
             state.place_cursor_at_end(cx);
         });
+
+        // Create / refresh the rich block editor state.
+        let rich_block = RichBlock::from_document_block(&self.blocks[idx]);
+        let rb_state = cx.new(|cx| {
+            let mut s = RichBlockState::new(cx);
+            s.set_content(&rich_block, cx);
+            s
+        });
+
+        // Subscribe: propagate changes back into blocks[idx].
+        let sub = cx.observe(&rb_state, |this, entity, cx| {
+            let split_req = entity.read(cx).split_requested;
+            let merge_req = entity.read(cx).merge_prev_requested;
+
+            if split_req.is_some() {
+                entity.update(cx, |s, _| s.split_requested = None);
+                if let Some(split_cursor) = split_req {
+                    this.split_block_at(split_cursor, cx);
+                }
+                return;
+            }
+            if merge_req {
+                entity.update(cx, |s, _| s.merge_prev_requested = false);
+                this.merge_with_previous_block(cx);
+                return;
+            }
+
+            // Regular content sync.
+            if let Some(idx) = this.active_block {
+                if idx < this.blocks.len() {
+                    let block = entity.read(cx).to_rich_block();
+                    let md = block.to_markdown();
+                    let node = Renderer::parse(&md)
+                        .0
+                        .into_iter()
+                        .next()
+                        .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+                    this.blocks[idx].source = md.trim_end().to_string() + "\n";
+                    this.blocks[idx].node = node;
+                    this.document.content = DocumentBlock::reassemble(&this.blocks);
+                    this.dirty = true;
+                    cx.notify();
+                }
+            }
+        });
+
+        self.active_rich_block = Some(rb_state);
+        self._rich_block_subscription = Some(sub);
         cx.notify();
     }
 
     /// Deactivate block editing — all blocks return to rendered view.
     pub fn deactivate_block(&mut self, cx: &mut Context<AppState>) {
         self.active_block = None;
+        self.active_rich_block = None;
+        self._rich_block_subscription = None;
         cx.notify();
     }
 
@@ -173,6 +232,8 @@ impl AppState {
         self.document = Document::new();
         self.blocks = vec![];
         self.active_block = None;
+        self.active_rich_block = None;
+        self._rich_block_subscription = None;
         self.dirty = false;
         self.github_config = None;
         self.github_sync_status = SyncStatus::Idle;
@@ -187,6 +248,8 @@ impl AppState {
         let content = doc.content.clone();
         self.blocks = Renderer::parse_blocks(&content);
         self.active_block = None;
+        self.active_rich_block = None;
+        self._rich_block_subscription = None;
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
         // If currently in Source/Split, populate the full editor too.
         if self.view_mode != ViewMode::Wysiwyg {
@@ -197,6 +260,207 @@ impl AppState {
         self.dirty = false;
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
+    }
+
+    /// Apply a formatting toggle to the currently active rich block's selection.
+    pub fn apply_format(&mut self, toggle: SpanFormatToggle, cx: &mut Context<AppState>) {
+        if let Some(rb) = &self.active_rich_block {
+            rb.update(cx, |state, cx| state.apply_format(toggle, cx));
+        }
+    }
+
+    /// Split the active block at `cursor`, creating two blocks.
+    pub fn split_block_at(&mut self, cursor: SpanCursor, cx: &mut Context<AppState>) {
+        let Some(idx) = self.active_block else { return; };
+        let Some(rb) = &self.active_rich_block else { return; };
+        let block = rb.read(cx).to_rich_block();
+
+        match block {
+            RichBlock::Paragraph { ref spans } => {
+                let split_vis = cursor.visual_offset(spans);
+
+                let before_spans: Vec<_> = {
+                    let mut result = Vec::new();
+                    let mut vis = 0;
+                    for span in spans {
+                        let len = span.text().chars().count();
+                        let span_end = vis + len;
+                        if span_end <= split_vis {
+                            result.push(span.clone());
+                        } else if vis < split_vis {
+                            let take = split_vis - vis;
+                            let text: String = span.text().chars().take(take).collect();
+                            match span {
+                                octodocs_core::InlineSpanKind::Styled(is) => {
+                                    result.push(octodocs_core::InlineSpanKind::Styled(
+                                        octodocs_core::InlineSpan::new(text, is.format.clone()),
+                                    ));
+                                }
+                                octodocs_core::InlineSpanKind::Link { url, .. } => {
+                                    result.push(octodocs_core::InlineSpanKind::Link {
+                                        text,
+                                        url: url.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        vis += len;
+                    }
+                    result
+                };
+
+                let after_spans: Vec<_> = {
+                    let mut result = Vec::new();
+                    let mut vis = 0;
+                    for span in spans {
+                        let len = span.text().chars().count();
+                        let span_start = vis;
+                        let span_end = vis + len;
+                        if span_start >= split_vis {
+                            result.push(span.clone());
+                        } else if span_end > split_vis {
+                            let skip = split_vis - span_start;
+                            let text: String = span.text().chars().skip(skip).collect();
+                            match span {
+                                octodocs_core::InlineSpanKind::Styled(is) => {
+                                    result.push(octodocs_core::InlineSpanKind::Styled(
+                                        octodocs_core::InlineSpan::new(text, is.format.clone()),
+                                    ));
+                                }
+                                octodocs_core::InlineSpanKind::Link { url, .. } => {
+                                    result.push(octodocs_core::InlineSpanKind::Link {
+                                        text,
+                                        url: url.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        vis += len;
+                    }
+                    result
+                };
+
+                let first_md = RichBlock::Paragraph {
+                    spans: if before_spans.is_empty() {
+                        vec![octodocs_core::InlineSpanKind::plain("")]
+                    } else {
+                        before_spans
+                    },
+                }
+                .to_markdown();
+                let second_md = RichBlock::Paragraph {
+                    spans: if after_spans.is_empty() {
+                        vec![octodocs_core::InlineSpanKind::plain("")]
+                    } else {
+                        after_spans
+                    },
+                }
+                .to_markdown();
+
+                let first_node = Renderer::parse(&first_md)
+                    .0
+                    .into_iter()
+                    .next()
+                    .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+                let second_node = Renderer::parse(&second_md)
+                    .0
+                    .into_iter()
+                    .next()
+                    .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+
+                self.active_rich_block = None;
+                self._rich_block_subscription = None;
+                self.active_block = None;
+
+                self.blocks[idx] = DocumentBlock {
+                    source: first_md.trim_end().to_string() + "\n",
+                    node: first_node,
+                };
+                self.blocks.insert(
+                    idx + 1,
+                    DocumentBlock {
+                        source: second_md.trim_end().to_string() + "\n",
+                        node: second_node,
+                    },
+                );
+
+                self.document.content = DocumentBlock::reassemble(&self.blocks);
+                self.dirty = true;
+                self.activate_block(idx + 1, cx);
+            }
+            _ => {
+                self.active_rich_block = None;
+                self._rich_block_subscription = None;
+                self.active_block = None;
+
+                let new_node = octodocs_core::RenderNode::Paragraph(vec![]);
+                self.blocks.insert(
+                    idx + 1,
+                    DocumentBlock { source: "\n".to_string(), node: new_node },
+                );
+                self.document.content = DocumentBlock::reassemble(&self.blocks);
+                self.dirty = true;
+                self.activate_block(idx + 1, cx);
+            }
+        }
+    }
+
+    /// Merge the active block with the block before it (triggered by Backspace at start).
+    pub fn merge_with_previous_block(&mut self, cx: &mut Context<AppState>) {
+        let Some(idx) = self.active_block else { return; };
+        if idx == 0 {
+            return;
+        }
+
+        let Some(rb) = &self.active_rich_block else { return; };
+        let curr_block = rb.read(cx).to_rich_block();
+        let prev_block = RichBlock::from_document_block(&self.blocks[idx - 1]);
+
+        let (merged_block, cursor_vis) = match (prev_block, curr_block) {
+            (
+                RichBlock::Paragraph { spans: mut prev_spans },
+                RichBlock::Paragraph { spans: curr_spans },
+            ) => {
+                let merge_cursor_vis =
+                    prev_spans.iter().map(|s| s.text().chars().count()).sum::<usize>();
+                prev_spans.extend(curr_spans);
+                if prev_spans.is_empty() {
+                    prev_spans.push(octodocs_core::InlineSpanKind::plain(""));
+                }
+                (RichBlock::Paragraph { spans: prev_spans }, merge_cursor_vis)
+            }
+            _ => return,
+        };
+
+        let merged_md = merged_block.to_markdown();
+        let merged_node = Renderer::parse(&merged_md)
+            .0
+            .into_iter()
+            .next()
+            .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+
+        self.active_rich_block = None;
+        self._rich_block_subscription = None;
+        self.active_block = None;
+
+        self.blocks[idx - 1] = DocumentBlock {
+            source: merged_md.trim_end().to_string() + "\n",
+            node: merged_node,
+        };
+        self.blocks.remove(idx);
+
+        self.document.content = DocumentBlock::reassemble(&self.blocks);
+        self.dirty = true;
+
+        self.activate_block(idx - 1, cx);
+        if let Some(rb) = &self.active_rich_block {
+            let spans = rb.read(cx).spans.clone();
+            let new_cursor = SpanCursor::from_visual_offset(&spans, cursor_vis);
+            rb.update(cx, |state, cx| {
+                state.cursor = new_cursor;
+                cx.notify();
+            });
+        }
     }
 
     fn trigger_github_sync(&mut self, cx: &mut Context<AppState>) {

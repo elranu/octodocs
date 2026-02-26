@@ -246,6 +246,125 @@ impl Renderer {
 
         RenderTree(nodes)
     }
+
+    /// Parse markdown text into a flat list of [`RichBlock`]s — the
+    /// higher-level block model used by the WYSIWYG inline editor.
+    pub fn parse_rich_blocks(text: &str) -> Vec<crate::rich_block::RichBlock> {
+        use crate::rich_block::{InlineSpan, InlineSpanKind, RichBlock, SpanFormat};
+
+        let options = Options::ENABLE_TABLES
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_GFM;
+
+        let parser = Parser::new_ext(text, options);
+        let mut blocks: Vec<RichBlock> = Vec::new();
+
+        let mut in_paragraph = false;
+        let mut inline_buf: Vec<InlineSpanKind> = Vec::new();
+        let mut in_heading: Option<u8> = None;
+        let mut heading_text = String::new();
+        let mut in_code_block = false;
+        let mut code_lang: Option<String> = None;
+        let mut code_buf = String::new();
+        let mut bold = false;
+        let mut italic = false;
+        let mut in_link: Option<String> = None;
+        let mut link_text = String::new();
+
+        for event in parser {
+            match event {
+                Event::Start(Tag::Heading { level, .. }) => {
+                    in_heading = Some(heading_level_to_u8(level));
+                    heading_text.clear();
+                }
+                Event::End(TagEnd::Heading(_)) => {
+                    if let Some(lvl) = in_heading.take() {
+                        blocks.push(RichBlock::Heading { level: lvl, text: heading_text.clone() });
+                    }
+                }
+                Event::Start(Tag::Paragraph) => {
+                    in_paragraph = true;
+                    inline_buf.clear();
+                }
+                Event::End(TagEnd::Paragraph) => {
+                    in_paragraph = false;
+                    if !inline_buf.is_empty() {
+                        blocks.push(RichBlock::Paragraph { spans: inline_buf.clone() });
+                        inline_buf.clear();
+                    }
+                }
+                Event::Start(Tag::CodeBlock(kind)) => {
+                    in_code_block = true;
+                    code_buf.clear();
+                    code_lang = match kind {
+                        CodeBlockKind::Fenced(lang) => {
+                            let l = lang.trim().to_string();
+                            if l.is_empty() { None } else { Some(l) }
+                        }
+                        CodeBlockKind::Indented => None,
+                    };
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    in_code_block = false;
+                    let is_mermaid = code_lang
+                        .as_deref()
+                        .map(|l| l.to_lowercase() == "mermaid")
+                        .unwrap_or(false);
+                    let content = code_buf.trim_end_matches('\n').to_string();
+                    if is_mermaid {
+                        blocks.push(RichBlock::MermaidBlock(content));
+                    } else {
+                        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                        blocks.push(RichBlock::CodeFence { lang: code_lang.clone(), lines });
+                    }
+                    code_lang = None;
+                }
+                Event::Start(Tag::Strong) => bold = true,
+                Event::End(TagEnd::Strong) => bold = false,
+                Event::Start(Tag::Emphasis) => italic = true,
+                Event::End(TagEnd::Emphasis) => italic = false,
+                Event::Start(Tag::Link { dest_url, .. }) => {
+                    in_link = Some(dest_url.into_string());
+                    link_text.clear();
+                }
+                Event::End(TagEnd::Link) => {
+                    if let Some(url) = in_link.take() {
+                        let span = InlineSpanKind::Link { text: link_text.clone(), url };
+                        if in_paragraph {
+                            inline_buf.push(span);
+                        }
+                        link_text.clear();
+                    }
+                }
+                Event::Rule => blocks.push(RichBlock::ThematicBreak),
+                Event::Text(text) => {
+                    let s = text.into_string();
+                    if in_code_block {
+                        code_buf.push_str(&s);
+                    } else if in_heading.is_some() {
+                        heading_text.push_str(&s);
+                    } else if in_link.is_some() {
+                        link_text.push_str(&s);
+                    } else if in_paragraph {
+                        let format = SpanFormat { bold, italic, code: false };
+                        inline_buf.push(InlineSpanKind::Styled(InlineSpan::new(s, format)));
+                    }
+                }
+                Event::Code(text) => {
+                    if in_paragraph {
+                        let format = SpanFormat { bold: false, italic: false, code: true };
+                        inline_buf
+                            .push(InlineSpanKind::Styled(InlineSpan::new(text.into_string(), format)));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        blocks
+    }
 }
 
 fn heading_level_to_u8(level: HeadingLevel) -> u8 {
@@ -300,5 +419,27 @@ mod tests {
         } else {
             panic!("expected paragraph");
         }
+    }
+
+    #[test]
+    fn round_trip_bold_italic() {
+        use crate::rich_block::RichBlock;
+        let md = "Hello **world** and *italic*\n";
+        let blocks = Renderer::parse_rich_blocks(md);
+        assert_eq!(blocks.len(), 1);
+        if let RichBlock::Paragraph { spans } = &blocks[0] {
+            let serialized = RichBlock::Paragraph { spans: spans.clone() }.to_markdown();
+            let blocks2 = Renderer::parse_rich_blocks(&serialized);
+            assert_eq!(blocks, blocks2);
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parse_rich_heading() {
+        use crate::rich_block::RichBlock;
+        let blocks = Renderer::parse_rich_blocks("# My Title\n");
+        assert!(matches!(&blocks[0], RichBlock::Heading { level: 1, text } if text == "My Title"));
     }
 }

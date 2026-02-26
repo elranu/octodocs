@@ -1,4 +1,5 @@
 mod app_state;
+mod rich_block_editor;
 mod views;
 
 use adabraka_ui::prelude::*;
@@ -54,6 +55,7 @@ fn main() {
         .run(|cx: &mut App| {
             adabraka_ui::init(cx);
             adabraka_ui::set_icon_base_path("assets/icons");
+            crate::rich_block_editor::init(cx);
 
             cx.open_window(
                 WindowOptions {

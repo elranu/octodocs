@@ -4,6 +4,7 @@ use octodocs_core::{DocumentBlock, Renderer};
 
 use super::preview_pane::render_node;
 use crate::app_state::AppState;
+use crate::rich_block_editor::RichBlockEditor;
 
 /// Full-width WYSIWYG pane.
 ///
@@ -38,6 +39,7 @@ impl Render for BlockEditorPane {
         let app = self.app_state.read(cx);
         let active = app.active_block;
         let editor_state = app.editor_state.clone();
+        let active_rich_block = app.active_rich_block.clone();
         let blocks: Vec<DocumentBlock> = app.blocks.clone();
         let app_weak = self.app_state.downgrade();
         drop(app);
@@ -73,9 +75,14 @@ impl Render for BlockEditorPane {
                         let _ = aw.update(cx, |state, cx| state.activate_block(i, cx));
                     })
                     .child(
-                        Editor::new(&editor_state)
-                            .min_lines(src_lines)
-                            .show_line_numbers(false, cx),
+                        if let Some(rb_state) = &active_rich_block {
+                            RichBlockEditor::new(rb_state).into_any_element()
+                        } else {
+                            Editor::new(&editor_state)
+                                .min_lines(src_lines)
+                                .show_line_numbers(false, cx)
+                                .into_any_element()
+                        },
                     )
                     .into_any_element()
             } else {

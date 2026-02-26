@@ -11,6 +11,7 @@ use super::editor_pane::EditorPane;
 use super::github_panel::GitHubPanel;
 use super::preview_pane::PreviewPane;
 use crate::app_state::AppState;
+use crate::rich_block_editor::SpanFormatToggle;
 
 pub struct RootView {
     app_state: Entity<AppState>,
@@ -83,19 +84,19 @@ impl RootView {
             let _ = aw.update(cx, |state, cx| state.save_as(cx));
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let bold_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("**", "**", cx));
+            let _ = aw.update(cx, |state, cx| state.apply_format(SpanFormatToggle::Bold, cx));
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let italic_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("*", "*", cx));
+            let _ = aw.update(cx, |state, cx| state.apply_format(SpanFormatToggle::Italic, cx));
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let code_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("`", "`", cx));
+            let _ = aw.update(cx, |state, cx| state.apply_format(SpanFormatToggle::Code, cx));
         };
 
         let ew = editor_weak.clone();
@@ -107,7 +108,6 @@ impl RootView {
         let h2_h = move |_w: &mut Window, cx: &mut App| {
             let _ = ew.update(cx, |state, cx| state.insert_text("## ", cx));
         };
-
         let is_dark = Rc::new(Cell::new(initial_is_dark));
         let is_dark_toggle = is_dark.clone();
         let theme_h = move |_w: &mut Window, cx: &mut App| {
