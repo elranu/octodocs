@@ -59,6 +59,20 @@ References:
 
 ---
 
+## Current Implementation Status (2026-02-26)
+
+- ✅ All 7 phases complete and building clean
+- ✅ Sidebar toggle redesigned: vertical rail (closed) + collapse button in sidebar header (open)
+- ✅ First-run onboarding: forces GitHub auth + repo selection (no example markdown)
+- ✅ Initial markdown import: recursively pulls all `.md` files from GitHub on first repo mapping
+- ✅ Import summary with auto-hide (6 seconds) in status bar
+- ✅ Subfolder-aware sync paths (files in subdirectories preserve relative paths in GitHub)
+- ✅ Contextual sync status badge (5 states: Not configured / Unsynced changes / Ready to sync / Synced / Synced other file)
+- ✅ File rename triggers remote rename on GitHub
+- ✅ `make reset-state` for clean-state testing
+
+---
+
 ## Index
 
 - [x] Phase 1: [AppState Extensions](#phase-1-appstate-extensions)
@@ -68,6 +82,7 @@ References:
 - [x] Phase 5: [GithubSidebar — File Explorer](#phase-5-githubsidebar--file-explorer)
 - [x] Phase 6: [Root Layout Integration](#phase-6-root-layout-integration)
 - [x] Phase 7: [File Open Guard (Save/Discard prompt)](#phase-7-file-open-guard-savediscard-prompt)
+- [x] Phase 8: [Post-Plan Enhancements](#phase-8-post-plan-enhancements)
 
 ---
 
@@ -242,7 +257,7 @@ New file: `views/github_sidebar.rs`
 - [x] Uses `std::fs::read_dir` to list directory contents synchronously (acceptable: local FS)
 - [x] Filters: show only items where `is_dir() == true` OR `extension() == "md"`
 - [x] State per instance: `expanded_dirs: HashSet<PathBuf>` — which folders are open
-- [ ] **Rendering rules**:
+- [x] **Rendering rules**:
   - Folder row: `chevron-right` (collapsed) / `chevron-down` (expanded) + `folder.svg` + name; click → toggle expanded
   - File row: `file.svg` + `name.md`; click → call `app_state.open_file_from_sidebar(abs_path, cx)`
   - Indent via `pl(px(N * 12.0))` per depth level
@@ -314,20 +329,38 @@ open_file_from_sidebar(path)
 
 ---
 
+### Phase 8: Post-Plan Enhancements
+
+Features added after the original plan was fully implemented:
+
+- [x] **Sidebar toggle redesign**: Removed toggle from toolbar. When sidebar is closed, a vertical rail (34px) appears on the left with a panel-left icon. When open, the collapse button is inside the sidebar header (top-right, next to "+").
+- [x] **First-run onboarding**: No example markdown on launch. App forces GitHub auth + repo selection before allowing editing.
+- [x] **Initial markdown import**: When "Enable Sync" is clicked in the repo-add wizard, all `.md` files are recursively pulled from the selected GitHub folder via `pull_markdown_files()` in `octodocs-github::discovery`.
+- [x] **Import summary**: Status bar shows "Imported N markdown files" after import, auto-hides after 6 seconds with a versioned timer guard.
+- [x] **Subfolder-aware sync**: `relative_sync_path()` helper preserves directory structure (e.g., `docs/guide.md` syncs to `folder/docs/guide.md`, not `folder/guide.md`).
+- [x] **Contextual sync status badge**: Status bar badge shows 5 states based on current file, dirty flag, and sync history: "Not configured", "Unsynced changes", "Ready to sync", "Synced", "Synced (other file)".
+- [x] **Rename sync**: File rename in sidebar triggers `sync_rename_to_github()` (delete old + push new on GitHub).
+- [x] **`make reset-state`**: Clears keyring token, file token, bindings TSV, and UI state TSV for clean testing.
+
+---
+
 ## Dependencies
 
-- No new crate dependencies
-- New SVG icons to add in `assets/icons/`: `plus.svg`, `file.svg`, `panel-left.svg` (Lucide)
+- No new crate dependencies (beyond `octodocs-github` which was added in the sync plan)
+- SVG icons added to `assets/icons/`: `plus.svg`, `file.svg`, `panel-left.svg`, `cloud-off.svg`, `alert-circle.svg`, `refresh-cw.svg`, `log-out.svg`, `x.svg` (Lucide)
 
 ---
 
 ## Success Criteria
 
-- [ ] GitHub toolbar button only opens auth modal
-- [ ] Sidebar toggle button independently shows/hides sidebar
-- [ ] Repo dropdown lists all `github_bindings`; "+" adds a new one (auth-gated)
-- [ ] File explorer shows all `.md` files and folders under the active binding's `local_root`
-- [ ] Clicking a `.md` opens it in the editor with correct save-guard behavior
-- [ ] Creating a file/folder from explorer writes to disk and appears in explorer
-- [ ] No regressions: existing save, sync, view mode, and auth flows still work
+- [x] GitHub toolbar button opens auth modal (or repo-add if already authenticated)
+- [x] Sidebar toggle: vertical rail when closed, collapse button in header when open
+- [x] Repo dropdown lists all `github_bindings`; "+" adds a new one (auth-gated)
+- [x] File explorer shows all `.md` files and folders under the active binding's `local_root`
+- [x] Clicking a `.md` opens it in the editor with correct save-guard behavior
+- [x] Creating a file/folder from explorer writes to disk and appears in explorer
+- [x] No regressions: existing save, sync, view mode, and auth flows still work
 - [x] `cargo build -p octodocs-app` succeeds with zero errors
+- [x] First-run onboarding forces auth + repo selection
+- [x] Initial import pulls existing `.md` files from GitHub
+- [x] Subfolder sync preserves directory structure in GitHub repo

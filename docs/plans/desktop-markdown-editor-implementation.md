@@ -4,18 +4,22 @@
 
 Build a simple, polished desktop Markdown editor as the first deliverable of the **OctoDocs** monorepo. The editor must support opening, creating, editing, saving, and "Save As" of `.md` files, with real-time Markdown preview and first-class Mermaid diagram rendering. It is built in Rust using **GPUI** (GPU-accelerated UI framework from Zed) with **adabraka-ui** as the component library.
 
-## Current Implementation Status (2026-02-25)
+## Current Implementation Status (2026-02-26)
 
-- ✅ Editor + live preview working in split-pane layout
-- ✅ New/Open/Save/Save As working from toolbar actions
-- ✅ Toolbar formatting actions working (bold, italic, h1, h2, inline code)
-- ✅ Theme initialization follows system window appearance (light/dark)
+- ✅ Editor + live preview working in split-pane layout (Phase 1-4)
+- ✅ New/Open/Save/Save As working from toolbar actions (Phase 7)
+- ✅ Toolbar formatting actions working (bold, italic, h1, h2, inline code) (Phase 6)
+- ✅ Theme initialization follows system window appearance (light/dark) (Phase 8)
 - ✅ Toolbar icon visibility fixed (icons loaded from crate-local assets path)
 - ✅ Clean `cargo build -p octodocs-app` with zero warnings
 - ✅ **Mermaid diagrams render as full-colour rasterized PNG images** (Phase 5 complete)
 - ✅ **WYSIWYG block editor shipped** — markdown syntax fully hidden, Notion/Typora-style (Phase 10 complete)
+- ✅ **GitHub sync** — auto-push on save, device flow auth, multi-repo bindings (separate plan)
+- ✅ **GitHub sidebar** — repo selector, file explorer, rename sync, import (separate plan)
+- ✅ **First-run onboarding** — forces GitHub auth + repo selection, imports existing `.md` files
 - ⚠️ Unsaved-changes confirmation dialog not implemented yet
 - ⚠️ MenuBar-based File menu was removed due upstream adabraka-ui menu rendering limitations in current vendored version
+- ⚠️ Phase 9 (testing) not yet implemented
 
 ### Phase 5 — Mermaid Rendering: Technical Notes
 
