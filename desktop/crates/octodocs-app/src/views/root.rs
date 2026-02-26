@@ -6,11 +6,15 @@ use gpui::Subscription;
 use octodocs_core::FileIo;
 
 use super::block_editor_pane::BlockEditorPane;
+use super::editor_pane::EditorPane;
+use super::preview_pane::PreviewPane;
 use crate::app_state::AppState;
 
 pub struct RootView {
     app_state: Entity<AppState>,
     block_editor_pane: Entity<BlockEditorPane>,
+    editor_pane: Entity<EditorPane>,
+    preview_pane: Entity<PreviewPane>,
     toolbar: Entity<Toolbar>,
     _pane_subscription: Subscription,
 }
@@ -19,11 +23,17 @@ impl RootView {
     pub fn new(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
         let app_state = cx.new(|cx| AppState::new(cx));
         let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
+        let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
+        let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
 
-        // Re-render the pane whenever AppState notifies (content/block changes).
-        let pane = block_editor_pane.clone();
+        // Re-render when AppState changes (content/block/mode changes).
+        let pane_bep = block_editor_pane.clone();
+        let pane_ep = editor_pane.clone();
+        let pane_pp = preview_pane.clone();
         let subscription = cx.observe(&app_state, move |_, _, cx| {
-            pane.update(cx, |_, cx| cx.notify());
+            pane_bep.update(cx, |_, cx| cx.notify());
+            pane_ep.update(cx, |_, cx| cx.notify());
+            pane_pp.update(cx, |_, cx| cx.notify());
         });
 
         // editor_weak targets the shared block editor — toolbar actions operate
@@ -163,6 +173,8 @@ impl RootView {
         Self {
             app_state,
             block_editor_pane,
+            editor_pane,
+            preview_pane,
             toolbar,
             _pane_subscription: subscription,
         }
@@ -176,9 +188,25 @@ impl Render for RootView {
         let title = app.document.title();
         let word_count = app.document.word_count();
         let dirty = app.dirty;
+        let view_mode = app.view_mode;
         drop(app);
 
         let dirty_dot = if dirty { "● " } else { "" };
+
+        let app_weak = self.app_state.downgrade();
+        let mode_badge = div()
+            .flex()
+            .items_center()
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded(px(4.0))
+            .bg(theme.tokens.muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.tokens.accent))
+            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                let _ = app_weak.update(cx, |state, cx| state.cycle_view_mode(cx));
+            })
+            .child(body_small(view_mode.label()));
 
         let status_bar = div()
             .flex()
@@ -191,7 +219,54 @@ impl Render for RootView {
             .border_color(theme.tokens.border)
             .child(body_small(format!("{}{}", dirty_dot, title)))
             .child(body_small(format!("{} words", word_count)))
-            .child(body_small("UTF-8"));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(mode_badge)
+                    .child(body_small("UTF-8")),
+            );
+
+        // Build content area based on view mode.
+        let content_area: AnyElement = match view_mode {
+            crate::app_state::ViewMode::Wysiwyg => div()
+                .flex()
+                .flex_grow()
+                .min_h_0()
+                .child(self.block_editor_pane.clone())
+                .into_any_element(),
+            crate::app_state::ViewMode::Source => div()
+                .flex()
+                .flex_grow()
+                .min_h_0()
+                .child(self.editor_pane.clone())
+                .into_any_element(),
+            crate::app_state::ViewMode::Split => div()
+                .flex()
+                .flex_row()
+                .flex_grow()
+                .min_h_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_1_2()
+                        .h_full()
+                        .border_r_1()
+                        .border_color(theme.tokens.border)
+                        .child(self.editor_pane.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_1_2()
+                        .h_full()
+                        .child(self.preview_pane.clone()),
+                )
+                .into_any_element(),
+        };
 
         div()
             .flex()
@@ -199,13 +274,7 @@ impl Render for RootView {
             .size_full()
             .bg(theme.tokens.background)
             .child(self.toolbar.clone())
-            .child(
-                div()
-                    .flex()
-                    .flex_grow()
-                    .min_h_0()
-                    .child(self.block_editor_pane.clone()),
-            )
+            .child(content_area)
             .child(status_bar)
     }
 }

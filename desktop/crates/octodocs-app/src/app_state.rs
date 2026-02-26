@@ -2,6 +2,36 @@ use adabraka_ui::prelude::*;
 use gpui::Subscription;
 use octodocs_core::{Document, DocumentBlock, Renderer};
 
+/// Which content layout the user is currently viewing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Single-pane WYSIWYG block editor (Typora/Notion style).
+    Wysiwyg,
+    /// Side-by-side raw Markdown source + live rendered preview.
+    Split,
+    /// Full-width raw Markdown source only.
+    Source,
+}
+
+impl ViewMode {
+    /// Cycle to the next mode in order: Wysiwyg → Split → Source → Wysiwyg.
+    pub fn next(self) -> Self {
+        match self {
+            ViewMode::Wysiwyg => ViewMode::Split,
+            ViewMode::Split => ViewMode::Source,
+            ViewMode::Source => ViewMode::Wysiwyg,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewMode::Wysiwyg => "WYSIWYG",
+            ViewMode::Split => "Split",
+            ViewMode::Source => "Source",
+        }
+    }
+}
+
 /// Central application state — one entity shared by all views.
 pub struct AppState {
     pub document: Document,
@@ -10,9 +40,14 @@ pub struct AppState {
     /// Index of the block currently open for inline editing, or `None` (all rendered).
     pub active_block: Option<usize>,
     pub dirty: bool,
-    /// Shared editor entity reused for whichever block is active.
+    /// Current view layout mode.
+    pub view_mode: ViewMode,
+    /// Shared editor entity reused for whichever block is active (WYSIWYG mode).
     pub editor_state: Entity<adabraka_ui::components::editor::EditorState>,
+    /// Full-document editor for Source and Split modes.
+    pub full_editor_state: Entity<adabraka_ui::components::editor::EditorState>,
     _content_subscription: Subscription,
+    _full_content_subscription: Subscription,
 }
 
 impl AppState {
@@ -21,6 +56,20 @@ impl AppState {
 
         let editor_state = cx.new(|cx| {
             adabraka_ui::components::editor::EditorState::new(cx)
+        });
+        let full_editor_state = cx.new(|cx| {
+            adabraka_ui::components::editor::EditorState::new(cx)
+        });
+
+        // When the full editor changes (Source/Split mode), sync document + blocks.
+        let full_subscription = cx.observe(&full_editor_state, |this, _, cx| {
+            if this.view_mode != ViewMode::Wysiwyg {
+                let content = this.full_editor_state.read(cx).content();
+                this.blocks = Renderer::parse_blocks(&content);
+                this.document.content = content;
+                this.dirty = true;
+                cx.notify();
+            }
         });
 
         // When the block editor changes, sync back to the active block.
@@ -49,9 +98,42 @@ impl AppState {
             blocks,
             active_block: None,
             dirty: false,
+            view_mode: ViewMode::Wysiwyg,
             editor_state,
+            full_editor_state,
             _content_subscription: subscription,
+            _full_content_subscription: full_subscription,
         }
+    }
+
+    /// Cycle to the next view mode, syncing content as needed.
+    pub fn cycle_view_mode(&mut self, cx: &mut Context<AppState>) {
+        let next = self.view_mode.next();
+        self.set_view_mode(next, cx);
+    }
+
+    /// Switch to a specific view mode, syncing content between editor states.
+    pub fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<AppState>) {
+        let was_wysiwyg = self.view_mode == ViewMode::Wysiwyg;
+        let going_wysiwyg = mode == ViewMode::Wysiwyg;
+
+        if was_wysiwyg && !going_wysiwyg {
+            // Leaving WYSIWYG: load full document into the full editor.
+            let content = self.document.content.clone();
+            self.active_block = None;
+            self.full_editor_state.update(cx, |state, cx| {
+                state.set_content(&content, cx);
+            });
+        } else if !was_wysiwyg && going_wysiwyg {
+            // Returning to WYSIWYG: re-parse blocks from full editor content.
+            let content = self.full_editor_state.read(cx).content();
+            self.blocks = Renderer::parse_blocks(&content);
+            self.document.content = content;
+            self.active_block = None;
+        }
+
+        self.view_mode = mode;
+        cx.notify();
     }
 
     /// Activate inline editing for block at `idx`.
@@ -79,6 +161,7 @@ impl AppState {
         self.active_block = None;
         self.dirty = false;
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
+        self.full_editor_state.update(cx, |state, cx| state.set_content("", cx));
         cx.notify();
     }
 
@@ -88,6 +171,11 @@ impl AppState {
         self.blocks = Renderer::parse_blocks(&content);
         self.active_block = None;
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
+        // If currently in Source/Split, populate the full editor too.
+        if self.view_mode != ViewMode::Wysiwyg {
+            let c = content.clone();
+            self.full_editor_state.update(cx, |state, cx| state.set_content(&c, cx));
+        }
         self.document = doc;
         self.dirty = false;
         cx.notify();

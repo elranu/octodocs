@@ -14,7 +14,7 @@ impl EditorPane {
 
 impl Render for EditorPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let editor_state = self.app_state.read(cx).editor_state.clone();
+        let editor_state = self.app_state.read(cx).full_editor_state.clone();
 
         div()
             .flex()
