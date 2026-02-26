@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::path::{Path, PathBuf};
 
 use adabraka_ui::prelude::*;
@@ -67,6 +67,8 @@ pub struct AppState {
     pub github_sync_status: SyncStatus,
     /// Last local file path that successfully synced to GitHub.
     pub last_synced_path: Option<PathBuf>,
+    /// Last repository import summary shown in status bar.
+    pub last_import_summary: Option<String>,
     /// Whether the GitHub sidebar is open.
     pub sidebar_open: bool,
     /// Whether the GitHub auth modal is open.
@@ -81,7 +83,9 @@ pub struct AppState {
     pub show_unsaved_prompt: bool,
     /// Action to perform after authentication succeeds.
     pub pending_post_auth_action: Option<PostAuthAction>,
+    _import_summary_version: u64,
     _sync_task: Option<Task<()>>,
+    _summary_task: Option<Task<()>>,
     _content_subscription: Subscription,
     _full_content_subscription: Subscription,
 }
@@ -280,6 +284,7 @@ impl AppState {
             github_bindings,
             github_sync_status: SyncStatus::Idle,
             last_synced_path: None,
+            last_import_summary: None,
             sidebar_open: true,
             auth_modal_open: false,
             repo_add_modal_open: false,
@@ -287,10 +292,35 @@ impl AppState {
             pending_open_path: None,
             show_unsaved_prompt: false,
             pending_post_auth_action: None,
+            _import_summary_version: 0,
             _sync_task: None,
+            _summary_task: None,
             _content_subscription: subscription,
             _full_content_subscription: full_subscription,
         }
+    }
+
+    pub fn set_import_summary(&mut self, message: String, cx: &mut Context<AppState>) {
+        self.last_import_summary = Some(message);
+        self._import_summary_version = self._import_summary_version.saturating_add(1);
+        let version = self._import_summary_version;
+        cx.notify();
+
+        self._summary_task = Some(cx.spawn(async move |this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move {
+                    std::thread::sleep(Duration::from_secs(6));
+                })
+                .await;
+
+            let _ = this.update(cx, |state, cx| {
+                if state._import_summary_version == version {
+                    state.last_import_summary = None;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Cycle to the next view mode, syncing content as needed.
@@ -349,6 +379,7 @@ impl AppState {
         self.dirty = false;
         self.github_sync_status = SyncStatus::Idle;
         self.last_synced_path = None;
+        self.last_import_summary = None;
         self.sidebar_open = false;
         self.auth_modal_open = false;
         self.repo_add_modal_open = false;

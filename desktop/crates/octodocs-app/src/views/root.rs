@@ -285,6 +285,7 @@ impl Render for RootView {
         let github_sync_configured = !app.github_bindings.is_empty();
         let current_doc_path = app.document.path.clone();
         let has_unsynced_changes = app.dirty && app.document.path.is_some();
+        let last_import_summary = app.last_import_summary.clone();
         let current_file_synced = match (app.document.path.as_ref(), app.last_synced_path.as_ref()) {
             (Some(current), Some(last)) => current == last,
             _ => false,
@@ -410,6 +411,9 @@ impl Render for RootView {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .when_some(last_import_summary, |this, summary| {
+                        this.child(body_small(summary).color(theme.tokens.muted_foreground))
+                    })
                     .child(sync_badge)
                     .child(mode_badge)
                     .child(body_small("UTF-8")),

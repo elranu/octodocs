@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use reqwest::StatusCode;
 use serde::Deserialize;
 
@@ -22,6 +23,12 @@ struct RepoApi {
 #[derive(Debug, Deserialize)]
 struct BranchApi {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileContentApi {
+    content: Option<String>,
+    encoding: Option<String>,
 }
 
 /// Parse the `rel="next"` link from the GitHub Link header for pagination.
@@ -175,4 +182,92 @@ pub fn list_folder(
         .collect::<Vec<_>>();
 
     Ok(items)
+}
+
+fn fetch_file_content(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    path: &str,
+) -> Result<String> {
+    let client = client::build(token)?;
+    let clean_path = path.trim_matches('/');
+    let url = format!(
+        "{API_BASE}/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}"
+    );
+
+    let response = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("Failed to fetch file content for '{clean_path}'"))?
+        .error_for_status()
+        .with_context(|| format!("GitHub API returned error while reading '{clean_path}'"))?;
+
+    let file: FileContentApi = response
+        .json()
+        .with_context(|| format!("Failed to parse file content for '{clean_path}'"))?;
+
+    let content = file
+        .content
+        .ok_or_else(|| anyhow::anyhow!("Missing content for '{clean_path}'"))?;
+    let encoding = file.encoding.unwrap_or_default().to_ascii_lowercase();
+
+    if encoding != "base64" {
+        return Err(anyhow::anyhow!(
+            "Unsupported encoding '{encoding}' for '{clean_path}'"
+        ));
+    }
+
+    let normalized = content.replace('\n', "");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(normalized.as_bytes())
+        .with_context(|| format!("Failed to decode base64 for '{clean_path}'"))?;
+
+    String::from_utf8(decoded)
+        .with_context(|| format!("File '{clean_path}' is not valid UTF-8"))
+}
+
+fn collect_markdown_files_recursive(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    path: &str,
+    out: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let entries = list_folder(token, owner, repo, branch, path)?;
+
+    for entry in entries {
+        if entry.is_dir {
+            collect_markdown_files_recursive(
+                token,
+                owner,
+                repo,
+                branch,
+                &entry.path,
+                out,
+            )?;
+            continue;
+        }
+
+        if entry.name.to_ascii_lowercase().ends_with(".md") {
+            let content = fetch_file_content(token, owner, repo, branch, &entry.path)?;
+            out.push((entry.path, content));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn pull_markdown_files(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    folder: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    collect_markdown_files_recursive(token, owner, repo, branch, folder, &mut out)?;
+    Ok(out)
 }

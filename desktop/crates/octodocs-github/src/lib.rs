@@ -11,7 +11,7 @@ pub use auth::{
     wait_for_token, DeviceFlowHandle, FileStore, KeyringStore, PollResult, TokenStore,
 };
 pub use client::build as build_client;
-pub use discovery::{list_branches, list_folder, list_repos};
+pub use discovery::{list_branches, list_folder, list_repos, pull_markdown_files};
 pub use sync::{delete_file, get_file_sha, push_file};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

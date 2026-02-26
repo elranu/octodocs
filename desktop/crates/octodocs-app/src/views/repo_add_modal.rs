@@ -8,7 +8,8 @@ use adabraka_ui::components::input_state::InputState;
 use adabraka_ui::prelude::*;
 use gpui::Task;
 use octodocs_github::{
-    list_branches, list_folder, list_repos, BranchInfo, FolderEntry, GitHubSyncConfig, RepoInfo,
+    list_branches, list_folder, list_repos, pull_markdown_files, BranchInfo, FolderEntry,
+    GitHubSyncConfig, RepoInfo,
 };
 
 use crate::app_state::AppState;
@@ -45,6 +46,7 @@ pub enum WizardState {
     Error {
         message: String,
     },
+    Applying,
 }
 
 pub struct RepoAddModal {
@@ -58,6 +60,23 @@ pub struct RepoAddModal {
 }
 
 impl RepoAddModal {
+    fn remote_to_local_path(local_root: &std::path::Path, base_folder: &str, remote_path: &str) -> PathBuf {
+        let normalized_remote = remote_path.trim_start_matches('/');
+        let base = base_folder.trim_matches('/');
+
+        let rel = if base.is_empty() {
+            normalized_remote.to_string()
+        } else {
+            let prefix = format!("{base}/");
+            normalized_remote
+                .strip_prefix(&prefix)
+                .unwrap_or(normalized_remote)
+                .to_string()
+        };
+
+        local_root.join(rel)
+    }
+
     fn confirm_default_for_empty_repo(&mut self, repo: RepoInfo, cx: &mut Context<Self>) {
         self.selected_local_root = self
             .app_state
@@ -368,25 +387,76 @@ impl RepoAddModal {
 
         let config_for_index = config.clone();
         let local_root_for_index = local_root.clone();
+        let token = self.auth_token.clone();
 
-        self.app_state.update(cx, |state, cx| {
-            state.upsert_github_binding(local_root, config, cx);
-            let selected_idx = state
-                .github_bindings
-                .iter()
-                .position(|binding| {
-                    binding.local_root == local_root_for_index
-                        && binding.config.owner == config_for_index.owner
-                        && binding.config.repo == config_for_index.repo
-                        && binding.config.branch == config_for_index.branch
-                        && binding.config.folder == config_for_index.folder
-                });
-            if let Some(idx) = selected_idx {
-                state.set_active_binding_idx(idx, cx);
-            }
-            state.repo_add_modal_open = false;
-            cx.notify();
-        });
+        self.state = WizardState::Applying;
+        cx.notify();
+
+        let weak = cx.entity().downgrade();
+        self._task = Some(cx.spawn(async move |_, cx| {
+            let config_for_pull = config.clone();
+            let local_root_for_pull = local_root.clone();
+            let import_result = cx
+                .background_executor()
+                .spawn(async move {
+                    let files = pull_markdown_files(
+                        &token,
+                        &config_for_pull.owner,
+                        &config_for_pull.repo,
+                        &config_for_pull.branch,
+                        &config_for_pull.folder,
+                    )?;
+                    let imported_count = files.len();
+
+                    for (remote_path, content) in files {
+                        let local_path = Self::remote_to_local_path(
+                            &local_root_for_pull,
+                            &config_for_pull.folder,
+                            &remote_path,
+                        );
+                        if let Some(parent) = local_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(local_path, content)?;
+                    }
+
+                    anyhow::Result::<usize>::Ok(imported_count)
+                })
+                .await;
+
+            let _ = weak.update(cx, |modal, cx| match import_result {
+                Ok(imported_count) => {
+                    modal.app_state.update(cx, |state, cx| {
+                        state.upsert_github_binding(local_root, config, cx);
+                        state.set_import_summary(
+                            format!("Imported {imported_count} markdown files"),
+                            cx,
+                        );
+                        let selected_idx = state
+                            .github_bindings
+                            .iter()
+                            .position(|binding| {
+                                binding.local_root == local_root_for_index
+                                    && binding.config.owner == config_for_index.owner
+                                    && binding.config.repo == config_for_index.repo
+                                    && binding.config.branch == config_for_index.branch
+                                    && binding.config.folder == config_for_index.folder
+                            });
+                        if let Some(idx) = selected_idx {
+                            state.set_active_binding_idx(idx, cx);
+                        }
+                        state.repo_add_modal_open = false;
+                        cx.notify();
+                    });
+                }
+                Err(err) => {
+                    modal.state = WizardState::Error {
+                        message: format!("Failed to import markdown files: {err}"),
+                    };
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
@@ -921,6 +991,16 @@ impl RepoAddModal {
                     )
                     .into_any_element()
             }
+            WizardState::Applying => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(12.0))
+                .py(px(28.0))
+                .child(Spinner::new().size(SpinnerSize::Md))
+                .child(body("Importing markdown files from selected folder..."))
+                .child(body_small("Only .md files are imported (including subfolders).").color(theme.tokens.muted_foreground))
+                .into_any_element(),
         }
     }
 }
