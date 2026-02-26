@@ -1,5 +1,10 @@
 use adabraka_ui::prelude::*;
 use octodocs_core::{Inline, RenderNode};
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::app_state::AppState;
 
@@ -76,34 +81,25 @@ fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyEleme
             .into_any_element(),
 
         RenderNode::MermaidBlock(source) => {
-            let lines: Vec<AnyElement> = source
-                .lines()
-                .map(|line| {
-                    let preserved = line.replace(' ', "\u{00A0}");
-                    code_small(preserved).into_any_element()
-                })
-                .collect();
-
-            div()
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.tokens.primary)
-                .bg(theme.tokens.muted)
-                .my(px(4.0))
-                .child(muted_small("⬡ Mermaid Diagram"))
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .p(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(theme.tokens.card)
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .children(lines),
-                )
-                .into_any_element()
+            match ensure_mermaid_png_path(source) {
+                Ok((png_path, logical_w, _logical_h)) => div()
+                    .p(px(12.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.tokens.primary)
+                    .bg(theme.tokens.card)
+                    .my(px(4.0))
+                    .child(muted_small("⬡ Mermaid Diagram"))
+                    .child(
+                        // Display at the diagram's natural (logical) width.
+                        // The PNG is rasterized at 2× so it stays crisp on HiDPI.
+                        img(Arc::<std::path::Path>::from(png_path.clone()))
+                            .w(px(logical_w))
+                            .mt(px(8.0)),
+                    )
+                    .into_any_element(),
+                Err(error) => render_mermaid_fallback(source, theme, Some(error.to_string())),
+            }
         }
 
         RenderNode::ThematicBreak => div()
@@ -161,6 +157,77 @@ fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyEleme
                 .into_any_element()
         }
     }
+}
+
+fn render_mermaid_fallback(
+    source: &str,
+    theme: &adabraka_ui::theme::Theme,
+    error: Option<String>,
+) -> AnyElement {
+    let lines: Vec<AnyElement> = source
+        .lines()
+        .map(|line| {
+            let preserved = line.replace(' ', "\u{00A0}");
+            code_small(preserved).into_any_element()
+        })
+        .collect();
+
+    let mut container = div()
+        .p(px(12.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.tokens.primary)
+        .bg(theme.tokens.muted)
+        .my(px(4.0))
+        .child(muted_small("⬡ Mermaid Diagram (fallback)"))
+        .child(
+            div()
+                .mt(px(6.0))
+                .p(px(8.0))
+                .rounded(px(4.0))
+                .bg(theme.tokens.card)
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .children(lines),
+        );
+
+    if let Some(error) = error {
+        container = container.child(
+            div()
+                .mt(px(8.0))
+                .child(muted_small(format!("Render error: {error}"))),
+        );
+    }
+
+    container.into_any_element()
+}
+
+/// Returns `(path_to_png, logical_width, logical_height)`.
+/// On cache hit the `.dims` sidecar is read so we avoid re-rendering.
+fn ensure_mermaid_png_path(source: &str) -> anyhow::Result<(PathBuf, f32, f32)> {
+    let mut hasher = DefaultHasher::new();
+    "mermaid-cache-v5".hash(&mut hasher);
+    source.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let cache_dir = std::env::temp_dir().join("octodocs-mermaid-cache");
+    fs::create_dir_all(&cache_dir)?;
+
+    let png_path: PathBuf = cache_dir.join(format!("{hash}.png"));
+    let dims_path: PathBuf = cache_dir.join(format!("{hash}.dims"));
+
+    if png_path.exists() && dims_path.exists() {
+        let raw = fs::read_to_string(&dims_path)?;
+        let mut parts = raw.split_whitespace();
+        let w: f32 = parts.next().ok_or_else(|| anyhow::anyhow!("bad dims"))?.parse()?;
+        let h: f32 = parts.next().ok_or_else(|| anyhow::anyhow!("bad dims"))?.parse()?;
+        return Ok((png_path, w, h));
+    }
+
+    let (lw, lh) = octodocs_core::mermaid::render_png(source, &png_path)?;
+    fs::write(&dims_path, format!("{lw} {lh}"))?;
+    Ok((png_path, lw, lh))
 }
 
 fn render_inline(inline: &Inline, theme: &adabraka_ui::theme::Theme) -> AnyElement {

@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 pulldown-cmark = { version = "0.13", default-features = false, features = ["getopts"] }
+anyhow = "1"
+mermaid-rs-renderer = { version = "0.2.0", default-features = false, features = ["png"] }
+resvg = "0.46.0"
+usvg = "0.46.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,5 +1,6 @@
 pub mod document;
 pub mod file_io;
+pub mod mermaid;
 pub mod renderer;
 
 pub use document::Document;
