@@ -115,19 +115,19 @@ No external dependencies required. The file explorer uses `std::fs::read_dir` (s
 ┌─ Toolbar ─────────────────────────────────────────────────────────────┐
 │ [new] [open] [save] [save-as] │ [bold] [italic] [h1] [h2] [code]     │
 │ [theme] │ [github (auth)] [sidebar-toggle]                            │
-├─ Content Area ──────────────────────────┬── GitHub Sidebar (260px) ───┤
-│                                         │  ┌ Repo ──────────────── ┐  │
-│  BlockEditorPane / EditorPane /         │  │ [repo dropdown    ▾] [+] │
-│  Split view                             │  └──────────────────────┘  │
-│                                         │  ┌ Files ─────────────── ┐  │
-│                                         │  │ 📁 docs/              │  │
-│                                         │  │   📄 intro.md         │  │
-│                                         │  │   📄 guide.md         │  │
-│                                         │  │ 📄 README.md          │  │
-│                                         │  │ ─────────────────     │  │
-│                                         │  │ [+ New File] [+ Folder]  │
-│                                         │  └──────────────────────┘  │
-├─ Status Bar ────────────────────────────┴────────────────────────────-┤
+├── GitHub Sidebar (260px) ───┬─ Content Area ──────────────────────────┤
+│  ┌ Repo ──────────────── ┐  │                                         │
+│  │ [repo dropdown    ▾] [+] │  BlockEditorPane / EditorPane /         │
+│  └──────────────────────┘  │  Split view                             │
+│  ┌ Files ─────────────── ┐  │                                         │
+│  │ 📁 docs/              │  │                                         │
+│  │   📄 intro.md         │  │                                         │
+│  │   📄 guide.md         │  │                                         │
+│  │ 📄 README.md          │  │                                         │
+│  │ ─────────────────     │  │                                         │
+│  │ [+ New File] [+ Folder]  │                                         │
+│  └──────────────────────┘  │                                         │
+├─ Status Bar ────────────────┴────────────────────────────────────────-┤
 ```
 
 ### New Files
@@ -159,7 +159,7 @@ No external dependencies required. The file explorer uses `std::fs::read_dir` (s
 
 ## Requirements
 
-- [ ] New Lucide SVG icons added to `assets/icons/`: `plus.svg`, `file.svg`, `panel-right.svg`
+- [ ] New Lucide SVG icons added to `assets/icons/`: `plus.svg`, `file.svg`, `panel-left.svg`
 - [ ] `views/mod.rs` updated to declare new modules
 - [ ] All existing `github_panel_open` references updated across `root.rs` and `app_state.rs`
 
@@ -258,12 +258,12 @@ Changes to [root.rs](desktop/crates/octodocs-app/src/views/root.rs):
 - [ ] Remove `github_panel: Entity<GitHubPanel>`
 - [ ] Toolbar: replace existing `github` button with two buttons:
   - `github` icon → toggles `auth_modal_open` (and calls `auth_modal.init(cx)`)
-  - `panel-right` icon → calls `app_state.toggle_sidebar(cx)`
+  - `panel-left` icon → calls `app_state.toggle_sidebar(cx)`
 - [ ] Content area: change from single `AnyElement` to flex-row:
   ```
-  [editor content (flex-grow)] | [sidebar (w: 260px, conditional)]
+  [sidebar (w: 260px, conditional)] | [editor content (flex-grow)]
   ```
-  Sidebar shown when `app_state.sidebar_open && !github_bindings.is_empty() || sidebar_open` (always show shell when toggled, even if empty)
+  Sidebar shown when `app_state.sidebar_open` (always show shell when toggled, even if empty)
 - [ ] Overlays at the end of root div:
   ```rust
   .when(auth_modal_open, |this| this.child(self.github_auth_modal.clone()))
@@ -317,7 +317,7 @@ open_file_from_sidebar(path)
 ## Dependencies
 
 - No new crate dependencies
-- New SVG icons to add in `assets/icons/`: `plus.svg`, `file.svg`, `panel-right.svg` (Lucide)
+- New SVG icons to add in `assets/icons/`: `plus.svg`, `file.svg`, `panel-left.svg` (Lucide)
 
 ---
 
