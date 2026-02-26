@@ -68,6 +68,31 @@ This is structurally identical to how Zed's own `Editor` works at a high level a
 
 ---
 
+## Execution Update — 2026-02-26
+
+### Delivered in this execution pass
+
+- Resolved selection + toolbar interaction regressions in the single-surface editor so toolbar formatting now acts on the intended selected range.
+- Fixed markdown span fragmentation by coalescing adjacent same-format spans before serialization, preventing noisy source output sequences.
+- Added additional inline formatting support:
+  - Underline
+  - Strikethrough
+- Wired new toolbar actions for underline and strikethrough in the desktop app toolbar.
+- Updated preview rendering to support underline and strikethrough inline nodes.
+- Added icon assets used by toolbar buttons:
+  - `underline.svg`
+  - `strikethrough.svg`
+
+### Important implementation note
+
+On this Linux environment, bold/italic visual face differentiation from font weight/style alone may not be reliably perceptible even when markdown state updates correctly. The editor now applies explicit visual emphasis for formatted runs so WYSIWYG feedback is immediate and deterministic.
+
+### Technique document
+
+See [docs/word-style-formatting-technique.md](../word-style-formatting-technique.md) for the debugging method, rendering strategy, and serialization safeguards used.
+
+---
+
 ## Investigation Findings
 
 ### What Exists and Can Be Reused
