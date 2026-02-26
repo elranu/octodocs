@@ -5,4 +5,4 @@ pub mod renderer;
 
 pub use document::Document;
 pub use file_io::FileIo;
-pub use renderer::{Inline, RenderNode, RenderTree, Renderer};
+pub use renderer::{DocumentBlock, Inline, RenderNode, RenderTree, Renderer};

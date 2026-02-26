@@ -431,6 +431,16 @@ impl EditorState {
         cx.notify();
     }
 
+    /// Place the cursor at the very end of the content without requiring action args.
+    /// Call this after `set_content` to make the editor feel like the user clicked
+    /// at the end of the block.
+    pub fn place_cursor_at_end(&mut self, cx: &mut Context<Self>) {
+        self.cursor.line = self.lines.len() - 1;
+        self.cursor.col = self.lines[self.cursor.line].len();
+        self.selection = None;
+        cx.notify();
+    }
+
     pub fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
         let page_size = 20;
         self.cursor.line = self.cursor.line.saturating_sub(page_size);

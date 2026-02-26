@@ -21,7 +21,13 @@ impl PreviewPane {
 impl Render for PreviewPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = use_theme();
-        let nodes = self.app_state.read(cx).render_tree.0.clone();
+        let nodes: Vec<octodocs_core::RenderNode> = self
+            .app_state
+            .read(cx)
+            .blocks
+            .iter()
+            .map(|b| b.node.clone())
+            .collect();
 
         let content: Vec<AnyElement> = nodes
             .iter()
@@ -45,7 +51,7 @@ impl Render for PreviewPane {
     }
 }
 
-fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyElement {
+pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyElement {
     match node {
         RenderNode::Heading { level, text } => {
             let element: AnyElement = match level {

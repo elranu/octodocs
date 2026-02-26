@@ -7,6 +7,29 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 #[derive(Debug, Clone)]
 pub struct RenderTree(pub Vec<RenderNode>);
 
+/// A single top-level block in a WYSIWYG document.
+/// Carries both the raw markdown source (for the inline editor) and the
+/// pre-parsed node (for rendered display).
+#[derive(Debug, Clone)]
+pub struct DocumentBlock {
+    /// Raw markdown source for this block, always ends with `\n`.
+    pub source: String,
+    /// Pre-parsed render node (reparsed whenever source changes).
+    pub node: RenderNode,
+}
+
+impl DocumentBlock {
+    /// Reconstruct the full markdown document from a slice of blocks.
+    /// Blocks are joined with a blank line (each source already ends with `\n`).
+    pub fn reassemble(blocks: &[DocumentBlock]) -> String {
+        blocks
+            .iter()
+            .map(|b| b.source.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RenderNode {
     Heading { level: u8, text: String },
@@ -38,6 +61,61 @@ pub enum Inline {
 pub struct Renderer;
 
 impl Renderer {
+    /// Split a markdown document into top-level `DocumentBlock`s.
+    /// Each block carries its raw source text (for the inline editor) and its
+    /// pre-parsed `RenderNode` (for rendered display).
+    pub fn parse_blocks(markdown: &str) -> Vec<DocumentBlock> {
+        let options = Options::ENABLE_TABLES
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_GFM;
+
+        let mut blocks: Vec<DocumentBlock> = Vec::new();
+        let mut depth: usize = 0;
+        let mut block_start: usize = 0;
+
+        for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+            match event {
+                Event::Start(_) => {
+                    if depth == 0 {
+                        block_start = range.start;
+                    }
+                    depth += 1;
+                }
+                Event::End(_) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let src = markdown[block_start..range.end.min(markdown.len())]
+                            .trim_end()
+                            .to_string();
+                        if !src.is_empty() {
+                            let node = Self::parse(&src)
+                                .0
+                                .into_iter()
+                                .next()
+                                .unwrap_or(RenderNode::Paragraph(vec![]));
+                            blocks.push(DocumentBlock { source: src + "\n", node });
+                        }
+                    }
+                }
+                // Thematic break (---) is a single event with no Start/End wrapper.
+                Event::Rule if depth == 0 => {
+                    let src = markdown[range].trim_end().to_string();
+                    if !src.is_empty() {
+                        blocks.push(DocumentBlock {
+                            source: src + "\n",
+                            node: RenderNode::ThematicBreak,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        blocks
+    }
+
     pub fn parse(markdown: &str) -> RenderTree {
         let options = Options::ENABLE_TABLES
             | Options::ENABLE_FOOTNOTES

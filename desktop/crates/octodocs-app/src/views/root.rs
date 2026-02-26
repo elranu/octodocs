@@ -5,29 +5,29 @@ use adabraka_ui::prelude::*;
 use gpui::Subscription;
 use octodocs_core::FileIo;
 
-use super::editor_pane::EditorPane;
-use super::preview_pane::PreviewPane;
+use super::block_editor_pane::BlockEditorPane;
 use crate::app_state::AppState;
 
 pub struct RootView {
     app_state: Entity<AppState>,
-    editor_pane: Entity<EditorPane>,
-    preview_pane: Entity<PreviewPane>,
+    block_editor_pane: Entity<BlockEditorPane>,
     toolbar: Entity<Toolbar>,
-    _preview_subscription: Subscription,
+    _pane_subscription: Subscription,
 }
 
 impl RootView {
     pub fn new(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
         let app_state = cx.new(|cx| AppState::new(cx));
-        let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
-        let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
+        let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
 
-        let preview = preview_pane.clone();
+        // Re-render the pane whenever AppState notifies (content/block changes).
+        let pane = block_editor_pane.clone();
         let subscription = cx.observe(&app_state, move |_, _, cx| {
-            preview.update(cx, |_, cx| cx.notify());
+            pane.update(cx, |_, cx| cx.notify());
         });
 
+        // editor_weak targets the shared block editor — toolbar actions operate
+        // on whichever block is currently active.
         let editor_weak = app_state.read(cx).editor_state.downgrade();
         let app_weak = app_state.downgrade();
 
@@ -162,10 +162,9 @@ impl RootView {
 
         Self {
             app_state,
-            editor_pane,
-            preview_pane,
+            block_editor_pane,
             toolbar,
-            _preview_subscription: subscription,
+            _pane_subscription: subscription,
         }
     }
 }
@@ -177,6 +176,7 @@ impl Render for RootView {
         let title = app.document.title();
         let word_count = app.document.word_count();
         let dirty = app.dirty;
+        drop(app);
 
         let dirty_dot = if dirty { "● " } else { "" };
 
@@ -202,28 +202,11 @@ impl Render for RootView {
             .child(
                 div()
                     .flex()
-                    .flex_row()
                     .flex_grow()
                     .min_h_0()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .w_1_2()
-                            .h_full()
-                            .border_r_1()
-                            .border_color(theme.tokens.border)
-                            .child(self.editor_pane.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .w_1_2()
-                            .h_full()
-                            .child(self.preview_pane.clone()),
-                    ),
+                    .child(self.block_editor_pane.clone()),
             )
             .child(status_bar)
     }
 }
+
