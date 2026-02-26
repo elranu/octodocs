@@ -92,11 +92,7 @@ impl AppState {
             if let Some(idx) = this.active_block {
                 if idx < this.blocks.len() {
                     let content = this.editor_state.read(cx).content();
-                    let node = Renderer::parse(&content)
-                        .0
-                        .into_iter()
-                        .next()
-                        .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+                    let node = parse_single_block(&content);
                     this.blocks[idx].source = content.trim_end().to_string() + "\n";
                     this.blocks[idx].node = node;
                     this.document.content = DocumentBlock::reassemble(&this.blocks);
@@ -200,11 +196,7 @@ impl AppState {
                 if idx < this.blocks.len() {
                     let block = entity.read(cx).to_rich_block();
                     let md = block.to_markdown();
-                    let node = Renderer::parse(&md)
-                        .0
-                        .into_iter()
-                        .next()
-                        .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+                    let node = parse_single_block(&md);
                     this.blocks[idx].source = md.trim_end().to_string() + "\n";
                     this.blocks[idx].node = node;
                     this.document.content = DocumentBlock::reassemble(&this.blocks);
@@ -357,16 +349,8 @@ impl AppState {
                 }
                 .to_markdown();
 
-                let first_node = Renderer::parse(&first_md)
-                    .0
-                    .into_iter()
-                    .next()
-                    .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
-                let second_node = Renderer::parse(&second_md)
-                    .0
-                    .into_iter()
-                    .next()
-                    .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+                let first_node = parse_single_block(&first_md);
+                let second_node = parse_single_block(&second_md);
 
                 self.active_rich_block = None;
                 self._rich_block_subscription = None;
@@ -433,11 +417,7 @@ impl AppState {
         };
 
         let merged_md = merged_block.to_markdown();
-        let merged_node = Renderer::parse(&merged_md)
-            .0
-            .into_iter()
-            .next()
-            .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
+        let merged_node = parse_single_block(&merged_md);
 
         self.active_rich_block = None;
         self._rich_block_subscription = None;
@@ -566,3 +546,12 @@ impl AppState {
     }
 }
 
+
+/// Parse a markdown string as a single block node, falling back to an empty paragraph.
+fn parse_single_block(md: &str) -> octodocs_core::RenderNode {
+    Renderer::parse(md)
+        .0
+        .into_iter()
+        .next()
+        .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]))
+}

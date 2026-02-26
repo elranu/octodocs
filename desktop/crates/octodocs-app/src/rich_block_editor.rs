@@ -793,8 +793,9 @@ impl EntityInputHandler for RichBlockState {
 
         if !new_text.is_empty() {
             if let Some(new_mr_utf16) = new_marked_range_utf16 {
-                let start = insert_start_vis + self.utf16_to_char_offset(new_mr_utf16.start);
-                let end = insert_start_vis + self.utf16_to_char_offset(new_mr_utf16.end);
+                // new_mr_utf16 is relative to new_text, convert within new_text
+                let start = insert_start_vis + utf16_to_char_offset_in(new_text, new_mr_utf16.start);
+                let end = insert_start_vis + utf16_to_char_offset_in(new_text, new_mr_utf16.end);
                 self.marked_range = Some(start..end);
             } else {
                 let end_vis = insert_start_vis + new_text.chars().count();
@@ -939,7 +940,7 @@ impl Element for RichBlockElement {
                         font.style = FontStyle::Italic;
                     }
                     if is.format.code {
-                        font.family = "Menlo, Monaco, Courier New".into();
+                        font.family = theme.tokens.font_mono.clone();
                     }
                     let bg = if is.format.code {
                         Some(theme.tokens.muted.opacity(0.6))
@@ -998,7 +999,7 @@ impl Element for RichBlockElement {
                     point(bounds.origin.x + x_start, bounds.origin.y),
                     size(x_end - x_start, line_height),
                 ),
-                rgba(0x4488_ff40),
+                theme.tokens.primary.opacity(0.25),
             ));
         }
 
@@ -1057,6 +1058,20 @@ fn char_offset_to_byte_offset(text: &str, char_offset: usize) -> usize {
 
 fn byte_offset_to_char_offset(text: &str, byte_offset: usize) -> usize {
     text.char_indices().take_while(|(b, _)| *b < byte_offset).count()
+}
+
+/// Convert a UTF-16 offset within `text` to a char (Unicode scalar) offset.
+fn utf16_to_char_offset_in(text: &str, utf16: usize) -> usize {
+    let mut count = 0usize;
+    let mut char_idx = 0usize;
+    for c in text.chars() {
+        if count >= utf16 {
+            break;
+        }
+        count += c.len_utf16();
+        char_idx += 1;
+    }
+    char_idx
 }
 
 // ── RichBlockEditor (div wrapper) ────────────────────────────────────────
