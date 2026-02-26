@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/octodocs-core",
+    "crates/octodocs-app",
+]
+resolver = "2"
+
+[patch.crates-io]
+adabraka-ui = { path = "patches/adabraka-ui" }
+adabraka-gpui = { path = "patches/adabraka-gpui" }

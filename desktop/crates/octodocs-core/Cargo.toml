@@ -1,0 +1,10 @@
+[package]
+name = "octodocs-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false, features = ["getopts"] }
+
+[dev-dependencies]
+tempfile = "3"
