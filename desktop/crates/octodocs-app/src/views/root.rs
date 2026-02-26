@@ -13,7 +13,7 @@ use super::github_auth_modal::GithubAuthModal;
 use super::github_sidebar::GithubSidebar;
 use super::preview_pane::PreviewPane;
 use super::repo_add_modal::RepoAddModal;
-use crate::app_state::AppState;
+use crate::app_state::{AppState, PostAuthAction};
 
 pub struct RootView {
     app_state: Entity<AppState>,
@@ -161,13 +161,6 @@ impl RootView {
             }
         };
 
-        let aw_sidebar = app_weak.clone();
-        let sidebar_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = aw_sidebar.update(cx, |state, cx| {
-                state.toggle_sidebar(cx);
-            });
-        };
-
         let toolbar = cx.new(|_| {
             Toolbar::new()
                 .size(ToolbarSize::Md)
@@ -235,14 +228,31 @@ impl RootView {
                                 .on_click(github_h),
                         ),
                 )
-                .group(
-                    ToolbarGroup::new().button(
-                        ToolbarButton::new("sidebar", IconSource::Named("panel-left".into()))
-                            .tooltip("Toggle GitHub Sidebar")
-                            .on_click(sidebar_h),
-                    ),
-                )
         });
+
+        let should_force_onboarding = app_state.read(cx).github_bindings.is_empty();
+        if should_force_onboarding {
+            match get_stored_token() {
+                Ok(Some(_)) => {
+                    let _ = app_state.update(cx, |state, cx| {
+                        state.repo_add_modal_open = true;
+                        state.auth_modal_open = false;
+                        state.sidebar_open = true;
+                        cx.notify();
+                    });
+                }
+                _ => {
+                    let _ = app_state.update(cx, |state, cx| {
+                        state.pending_post_auth_action = Some(PostAuthAction::AddRepo);
+                        state.auth_modal_open = true;
+                        state.repo_add_modal_open = false;
+                        state.sidebar_open = true;
+                        cx.notify();
+                    });
+                    let _ = github_auth_modal.update(cx, |modal, cx| modal.init(cx));
+                }
+            }
+        }
 
         Self {
             app_state,
@@ -451,6 +461,31 @@ impl Render for RootView {
             .flex_grow()
             .min_h_0()
             .when(sidebar_open, |this| this.child(self.github_sidebar.clone()))
+            .when(!sidebar_open, |this| {
+                let app_weak_toggle_collapsed = self.app_state.downgrade();
+                this.child(
+                    div()
+                        .w(px(34.0))
+                        .h_full()
+                        .flex()
+                        .items_start()
+                        .justify_center()
+                        .pt(px(8.0))
+                        .border_r_1()
+                        .border_color(theme.tokens.border)
+                        .bg(theme.tokens.card)
+                        .child(
+                            IconButton::new(IconSource::Named("panel-left".into()))
+                                .size(px(26.0))
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    let _ = app_weak_toggle_collapsed.update(cx, |state, cx| {
+                                        state.toggle_sidebar(cx);
+                                    });
+                                }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()

@@ -551,6 +551,7 @@ impl Render for GithubSidebar {
         };
 
         let add_weak = weak.clone();
+        let toggle_weak = self.app_state.downgrade();
         let context_menu_overlay: AnyElement = if let Some((target_path, click_position)) = self.file_context_menu.clone() {
             let rename_weak = weak.clone();
             let duplicate_weak = weak.clone();
@@ -826,13 +827,29 @@ impl Render for GithubSidebar {
                     .justify_between()
                     .child(h5("Repositories"))
                     .child(
-                        IconButton::new(IconSource::Named("plus".into()))
-                            .size(px(26.0))
-                            .variant(ButtonVariant::Ghost)
-                            .on_click(move |_, _w, cx| {
-                                let _ = add_weak
-                                    .update(cx, |sidebar, cx| sidebar.open_add_repo_flow(cx));
-                            }),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                IconButton::new(IconSource::Named("plus".into()))
+                                    .size(px(26.0))
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _w, cx| {
+                                        let _ = add_weak
+                                            .update(cx, |sidebar, cx| sidebar.open_add_repo_flow(cx));
+                                    }),
+                            )
+                            .child(
+                                IconButton::new(IconSource::Named("panel-left".into()))
+                                    .size(px(26.0))
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = toggle_weak.update(cx, |state, cx| {
+                                            state.toggle_sidebar(cx);
+                                        });
+                                    }),
+                            ),
                     ),
             )
             .child(repo_selector)

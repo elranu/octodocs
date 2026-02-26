@@ -209,8 +209,6 @@ impl AppState {
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let default_content = "# Welcome to OctoDocs\n\nStart typing **Markdown** here and watch the preview update live.\n\n## Features\n\n- Live preview\n- Open, save, and create `.md` files\n- Mermaid diagram support\n\n## Example\n\n> This is a blockquote.\n\n```mermaid\ngraph TD\n    A[Start] --> B[Edit Markdown]\n    B --> C[Preview updates]\n```\n";
-
         let editor_state = cx.new(|cx| {
             adabraka_ui::components::editor::EditorState::new(cx)
         });
@@ -251,7 +249,7 @@ impl AppState {
         let github_bindings = Self::load_github_bindings_from_disk();
         let (saved_active_binding_idx, saved_last_opened_file) = Self::load_ui_state_from_disk();
 
-        let mut document = Document::with_content(default_content);
+        let mut document = Document::new();
         if let Some(path) = saved_last_opened_file {
             if let Ok(doc) = octodocs_core::FileIo::open(&path) {
                 document = doc;
