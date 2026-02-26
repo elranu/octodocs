@@ -146,4 +146,4 @@ OctoDocs is in active development. Here's what's working:
 
 ## License
 
-This project is under active development. License TBD.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
