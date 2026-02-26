@@ -59,12 +59,12 @@ Investigation of `EditorState` (1641 lines) reveals three fundamental blockers:
 
 ## Index
 
-- [ ] Phase 1: [Inline Span Data Model (core crate)](#phase-1-inline-span-data-model-core-crate)
-- [ ] Phase 2: [Markdown ↔ Span Round-trip (core crate)](#phase-2-markdown--span-round-trip-core-crate)
-- [ ] Phase 3: [RichBlockState — Input & Cursor Engine (patch)](#phase-3-richblockstate--input--cursor-engine-patch)
-- [ ] Phase 4: [RichBlockElement — Paint Pass (patch)](#phase-4-richblockelement--paint-pass-patch)
-- [ ] Phase 5: [Toolbar Integration & AppState Wiring (app)](#phase-5-toolbar-integration--appstate-wiring-app)
-- [ ] Phase 6: [Block Splitting / Merging on Enter / Backspace (app + patch)](#phase-6-block-splitting--merging-on-enter--backspace-app--patch)
+- [x] Phase 1: [Inline Span Data Model (core crate)](#phase-1-inline-span-data-model-core-crate)
+- [x] Phase 2: [Markdown ↔ Span Round-trip (core crate)](#phase-2-markdown--span-round-trip-core-crate)
+- [x] Phase 3: [RichBlockState — Input & Cursor Engine (patch)](#phase-3-richblockstate--input--cursor-engine-patch)
+- [x] Phase 4: [RichBlockElement — Paint Pass (patch)](#phase-4-richblockelement--paint-pass-patch)
+- [x] Phase 5: [Toolbar Integration & AppState Wiring (app)](#phase-5-toolbar-integration--appstate-wiring-app)
+- [x] Phase 6: [Block Splitting / Merging on Enter / Backspace (app + patch)](#phase-6-block-splitting--merging-on-enter--backspace-app--patch)
 
 ---
 
@@ -308,12 +308,12 @@ New GPUI `Element` + `Entity` pair. Stores spans, not raw text. Syntax character
 
 ## Requirements
 
-- [ ] `octodocs-core` extended with `RichBlock` enum and `InlineSpan` types
-- [ ] Markdown → `Vec<RichBlock>` parser (`Renderer::parse_rich_blocks()`)
-- [ ] `Vec<RichBlock>` → Markdown serializer (`RichBlock::to_markdown()`)
-- [ ] `patches/adabraka-ui/src/components/rich_block_editor.rs` created
-- [ ] `RichBlockState` exported from adabraka-ui prelude
-- [ ] `BlockEditorPane` updated to use `RichBlockState` per active block
+- [x] `octodocs-core` extended with `RichBlock` enum and `InlineSpan` types
+- [x] Markdown → `Vec<RichBlock>` parser (`Renderer::parse_rich_blocks()`)
+- [x] `Vec<RichBlock>` → Markdown serializer (`RichBlock::to_markdown()`)
+- [x] `desktop/crates/octodocs-app/src/rich_block_editor.rs` created (placed in app crate, not patch, to avoid Cargo.toml changes)
+- [x] `RichBlockState` exported from `crate::rich_block_editor` and registered in `main.rs`
+- [x] `BlockEditorPane` updated to use `RichBlockState` per active block
 
 ---
 
@@ -459,3 +459,37 @@ No new Rust crates required. All primitives are already present:
 - [ ] Mermaid blocks remain rendered-only
 - [ ] All `octodocs-core` unit tests pass (including new round-trip tests)
 - [ ] `cargo build -p octodocs-app` zero errors and zero warnings
+
+---
+
+## Considerations and Learned Lessons
+
+### All Phases — Completed
+
+#### Architecture Note: Component Location
+`rich_block_editor.rs` was placed in `desktop/crates/octodocs-app/src/` (not `patches/adabraka-ui/`) because `adabraka-ui` has no dependency on `octodocs-core`, and adding one would require modifying the vendored patch's `Cargo.toml`. Keeping it in `octodocs-app` avoids that complexity while still achieving the same functional result.
+
+#### Files Created
+- `desktop/crates/octodocs-core/src/rich_block.rs` — `RichBlock`, `InlineSpan`, `InlineSpanKind`, `SpanFormat`, `to_markdown()`, `from_document_block()`
+- `desktop/crates/octodocs-app/src/rich_block_editor.rs` — `RichBlockState`, `SpanCursor`, `SpanSelection`, `SpanFormatToggle`, `RichBlockElement`, `RichBlockEditor`
+
+#### Files Modified
+- `octodocs-core/src/lib.rs` — exports `rich_block` module
+- `octodocs-core/src/renderer.rs` — `Renderer::parse_rich_blocks()` + round-trip tests
+- `octodocs-app/src/main.rs` — `rich_block_editor::init(cx)` keybinding registration
+- `octodocs-app/src/app_state.rs` — `active_rich_block`, `apply_format()`, `split_block_at()`, `merge_with_previous_block()`
+- `octodocs-app/src/views/root.rs` — toolbar bold/italic/code now call `state.apply_format()`
+- `octodocs-app/src/views/block_editor_pane.rs` — renders `RichBlockEditor` for active block
+
+#### Build Validation
+- `cargo test -p octodocs-core`: 18/18 tests pass
+- `cargo check -p octodocs-app`: 0 errors, warnings only (pre-existing + dead code)
+- `cargo clippy -p octodocs-app`: 0 errors
+- Linker error for X11 libraries (`-lxcb`, `-lxkbcommon`) is expected in headless CI — not a code issue
+
+#### Key Implementation Decisions
+- `ShapedLine` is stored as `last_shaped` on `RichBlockState` for mouse hit-testing
+- Span format toggling uses "all selected spans have format → turn off, else turn on" semantics (standard behavior)
+- `split_requested` and `merge_prev_requested` are public fields polled in the `cx.observe` callback
+- `delete_selection_range` reconstructs spans by visual offset to avoid complex span-traversal logic
+- The `merge_adjacent_same_format` function uses `std::mem::take` to avoid borrow checker issues

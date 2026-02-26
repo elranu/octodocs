@@ -957,7 +957,6 @@ impl Element for RichBlockElement {
                     });
                 }
                 InlineSpanKind::Link { .. } => {
-                    let byte_len = span.text().len();
                     text_runs.push(TextRun {
                         len: byte_len,
                         font: text_style.font(),

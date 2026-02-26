@@ -38,6 +38,44 @@ impl InlineSpanKind {
     }
 }
 
+/// Serialize a slice of `InlineSpanKind` to inline markdown (no trailing newline).
+pub fn spans_to_markdown(spans: &[InlineSpanKind]) -> String {
+    let mut s = String::new();
+    for span in spans {
+        match span {
+            InlineSpanKind::Styled(is) => {
+                if is.format.code {
+                    s.push('`');
+                    s.push_str(&is.text);
+                    s.push('`');
+                } else if is.format.bold && is.format.italic {
+                    s.push_str("***");
+                    s.push_str(&is.text);
+                    s.push_str("***");
+                } else if is.format.bold {
+                    s.push_str("**");
+                    s.push_str(&is.text);
+                    s.push_str("**");
+                } else if is.format.italic {
+                    s.push('*');
+                    s.push_str(&is.text);
+                    s.push('*');
+                } else {
+                    s.push_str(&is.text);
+                }
+            }
+            InlineSpanKind::Link { text, url } => {
+                s.push('[');
+                s.push_str(text);
+                s.push_str("](");
+                s.push_str(url);
+                s.push(')');
+            }
+        }
+    }
+    s
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RichBlock {
     Paragraph { spans: Vec<InlineSpanKind> },
@@ -53,39 +91,7 @@ impl RichBlock {
     pub fn to_markdown(&self) -> String {
         match self {
             RichBlock::Paragraph { spans } => {
-                let mut s = String::new();
-                for span in spans {
-                    match span {
-                        InlineSpanKind::Styled(is) => {
-                            if is.format.code {
-                                s.push('`');
-                                s.push_str(&is.text);
-                                s.push('`');
-                            } else if is.format.bold && is.format.italic {
-                                s.push_str("***");
-                                s.push_str(&is.text);
-                                s.push_str("***");
-                            } else if is.format.bold {
-                                s.push_str("**");
-                                s.push_str(&is.text);
-                                s.push_str("**");
-                            } else if is.format.italic {
-                                s.push('*');
-                                s.push_str(&is.text);
-                                s.push('*');
-                            } else {
-                                s.push_str(&is.text);
-                            }
-                        }
-                        InlineSpanKind::Link { text, url } => {
-                            s.push('[');
-                            s.push_str(text);
-                            s.push_str("](");
-                            s.push_str(url);
-                            s.push(')');
-                        }
-                    }
-                }
+                let mut s = spans_to_markdown(spans);
                 s.push('\n');
                 s
             }
@@ -109,21 +115,14 @@ impl RichBlock {
                         "- ".to_string()
                     };
                     s.push_str(&prefix);
-                    for span in item {
-                        s.push_str(span.text());
-                    }
+                    s.push_str(&spans_to_markdown(item));
                     s.push('\n');
                 }
                 s
             }
             RichBlock::ThematicBreak => "---\n".to_string(),
             RichBlock::BlockQuote(spans) => {
-                let mut s = "> ".to_string();
-                for span in spans {
-                    s.push_str(span.text());
-                }
-                s.push('\n');
-                s
+                format!("> {}\n", spans_to_markdown(spans))
             }
         }
     }

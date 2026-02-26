@@ -213,19 +213,22 @@ impl AppState {
 
     /// Deactivate block editing — all blocks return to rendered view.
     pub fn deactivate_block(&mut self, cx: &mut Context<AppState>) {
+        self.clear_active_rich_block();
+        cx.notify();
+    }
+
+    /// Internal helper: clear the active rich block state and its subscription.
+    fn clear_active_rich_block(&mut self) {
         self.active_block = None;
         self.active_rich_block = None;
         self._rich_block_subscription = None;
-        cx.notify();
     }
 
     /// Reset to a brand new empty document.
     pub fn new_document(&mut self, cx: &mut Context<AppState>) {
         self.document = Document::new();
         self.blocks = vec![];
-        self.active_block = None;
-        self.active_rich_block = None;
-        self._rich_block_subscription = None;
+        self.clear_active_rich_block();
         self.dirty = false;
         self.github_config = None;
         self.github_sync_status = SyncStatus::Idle;
@@ -239,9 +242,7 @@ impl AppState {
     pub fn load_document(&mut self, doc: Document, cx: &mut Context<AppState>) {
         let content = doc.content.clone();
         self.blocks = Renderer::parse_blocks(&content);
-        self.active_block = None;
-        self.active_rich_block = None;
-        self._rich_block_subscription = None;
+        self.clear_active_rich_block();
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
         // If currently in Source/Split, populate the full editor too.
         if self.view_mode != ViewMode::Wysiwyg {
@@ -352,9 +353,7 @@ impl AppState {
                 let first_node = parse_single_block(&first_md);
                 let second_node = parse_single_block(&second_md);
 
-                self.active_rich_block = None;
-                self._rich_block_subscription = None;
-                self.active_block = None;
+                self.clear_active_rich_block();
 
                 self.blocks[idx] = DocumentBlock {
                     source: first_md.trim_end().to_string() + "\n",
@@ -373,9 +372,7 @@ impl AppState {
                 self.activate_block(idx + 1, cx);
             }
             _ => {
-                self.active_rich_block = None;
-                self._rich_block_subscription = None;
-                self.active_block = None;
+                self.clear_active_rich_block();
 
                 let new_node = octodocs_core::RenderNode::Paragraph(vec![]);
                 self.blocks.insert(
@@ -419,9 +416,7 @@ impl AppState {
         let merged_md = merged_block.to_markdown();
         let merged_node = parse_single_block(&merged_md);
 
-        self.active_rich_block = None;
-        self._rich_block_subscription = None;
-        self.active_block = None;
+        self.clear_active_rich_block();
 
         self.blocks[idx - 1] = DocumentBlock {
             source: merged_md.trim_end().to_string() + "\n",
