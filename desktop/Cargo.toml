@@ -2,6 +2,7 @@
 members = [
     "crates/octodocs-core",
     "crates/octodocs-app",
+    "crates/octodocs-github",
 ]
 resolver = "2"
 

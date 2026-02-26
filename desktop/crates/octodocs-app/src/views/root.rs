@@ -4,9 +4,11 @@ use std::rc::Rc;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
 use octodocs_core::FileIo;
+use octodocs_github::SyncStatus;
 
 use super::block_editor_pane::BlockEditorPane;
 use super::editor_pane::EditorPane;
+use super::github_panel::GitHubPanel;
 use super::preview_pane::PreviewPane;
 use crate::app_state::AppState;
 
@@ -15,8 +17,10 @@ pub struct RootView {
     block_editor_pane: Entity<BlockEditorPane>,
     editor_pane: Entity<EditorPane>,
     preview_pane: Entity<PreviewPane>,
+    github_panel: Entity<GitHubPanel>,
     toolbar: Entity<Toolbar>,
     _pane_subscription: Subscription,
+    _github_panel_subscription: Subscription,
 }
 
 impl RootView {
@@ -25,6 +29,7 @@ impl RootView {
         let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
+        let github_panel = cx.new(|_| GitHubPanel::new(app_state.clone()));
 
         // Re-render when AppState changes (content/block/mode changes).
         let pane_bep = block_editor_pane.clone();
@@ -34,6 +39,13 @@ impl RootView {
             pane_bep.update(cx, |_, cx| cx.notify());
             pane_ep.update(cx, |_, cx| cx.notify());
             pane_pp.update(cx, |_, cx| cx.notify());
+        });
+
+        // Also re-render root when AppState changes (for github_panel_open).
+        let github_panel_clone = github_panel.clone();
+        let github_panel_subscription = cx.observe(&app_state, move |_this, _, cx| {
+            cx.notify();
+            github_panel_clone.update(cx, |_, cx| cx.notify());
         });
 
         // editor_weak targets the shared block editor — toolbar actions operate
@@ -107,6 +119,17 @@ impl RootView {
             is_dark_toggle.set(!is_dark_toggle.get());
         };
 
+        let github_panel_weak = github_panel.downgrade();
+        let aw_github = app_weak.clone();
+        let github_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw_github.update(cx, |state, cx| {
+                state.github_panel_open = !state.github_panel_open;
+                cx.notify();
+            });
+            // Initialize the panel when opening
+            let _ = github_panel_weak.update(cx, |panel, cx| panel.init(cx));
+        };
+
         let toolbar = cx.new(|_| {
             Toolbar::new()
                 .size(ToolbarSize::Md)
@@ -166,6 +189,12 @@ impl RootView {
                             ToolbarButton::new("theme", IconSource::Named("moon".into()))
                                 .tooltip("Toggle Theme")
                                 .on_click(theme_h),
+                        )
+                        .separator()
+                        .button(
+                            ToolbarButton::new("github", IconSource::Named("github".into()))
+                                .tooltip("GitHub Sync")
+                                .on_click(github_h),
                         ),
                 )
         });
@@ -175,8 +204,10 @@ impl RootView {
             block_editor_pane,
             editor_pane,
             preview_pane,
+            github_panel,
             toolbar,
             _pane_subscription: subscription,
+            _github_panel_subscription: github_panel_subscription,
         }
     }
 }
@@ -189,6 +220,8 @@ impl Render for RootView {
         let word_count = app.document.word_count();
         let dirty = app.dirty;
         let view_mode = app.view_mode;
+        let github_panel_open = app.github_panel_open;
+        let github_sync_status = app.github_sync_status.clone();
         drop(app);
 
         let dirty_dot = if dirty { "● " } else { "" };
@@ -208,6 +241,55 @@ impl Render for RootView {
             })
             .child(body_small(view_mode.label()));
 
+        // Sync status badge for status bar (clickable to open GitHub panel)
+        let github_panel_weak = self.github_panel.downgrade();
+        let app_weak_sync = self.app_state.downgrade();
+        let sync_badge_content: AnyElement = match &github_sync_status {
+            SyncStatus::Idle => div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(Icon::new(IconSource::Named("cloud-off".into())).size_3().color(theme.tokens.muted_foreground))
+                .into_any_element(),
+            SyncStatus::Syncing => div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(Spinner::new().size(SpinnerSize::Xs))
+                .child(body_small("Syncing...").color(theme.tokens.muted_foreground))
+                .into_any_element(),
+            SyncStatus::Success { .. } => div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(Icon::new(IconSource::Named("check".into())).size_3().color(theme.tokens.primary))
+                .child(body_small("Synced").color(theme.tokens.primary))
+                .into_any_element(),
+            SyncStatus::Failed { message: _ } => div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(Icon::new(IconSource::Named("alert-circle".into())).size_3().color(theme.tokens.destructive))
+                .child(body_small("Sync failed").color(theme.tokens.destructive))
+                .into_any_element(),
+        };
+
+        let sync_badge = div()
+            .id("sync-badge")
+            .cursor_pointer()
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(4.0))
+            .hover(|s| s.bg(theme.tokens.accent))
+            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                let _ = app_weak_sync.update(cx, |state, cx| {
+                    state.github_panel_open = !state.github_panel_open;
+                    cx.notify();
+                });
+                let _ = github_panel_weak.update(cx, |panel, cx| panel.init(cx));
+            })
+            .child(sync_badge_content);
+
         let status_bar = div()
             .flex()
             .items_center()
@@ -224,6 +306,7 @@ impl Render for RootView {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .child(sync_badge)
                     .child(mode_badge)
                     .child(body_small("UTF-8")),
             );
@@ -276,6 +359,9 @@ impl Render for RootView {
             .child(self.toolbar.clone())
             .child(content_area)
             .child(status_bar)
+            .when(github_panel_open, |this| {
+                this.child(self.github_panel.clone())
+            })
     }
 }
 

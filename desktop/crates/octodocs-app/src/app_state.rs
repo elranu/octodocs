@@ -1,6 +1,9 @@
+use std::time::SystemTime;
+
 use adabraka_ui::prelude::*;
-use gpui::Subscription;
+use gpui::{Subscription, Task};
 use octodocs_core::{Document, DocumentBlock, Renderer};
+use octodocs_github::{GitHubSyncConfig, SyncStatus};
 
 /// Which content layout the user is currently viewing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,13 @@ pub struct AppState {
     pub editor_state: Entity<adabraka_ui::components::editor::EditorState>,
     /// Full-document editor for Source and Split modes.
     pub full_editor_state: Entity<adabraka_ui::components::editor::EditorState>,
+    /// Optional GitHub destination for autosync.
+    pub github_config: Option<GitHubSyncConfig>,
+    /// Runtime status of GitHub autosync.
+    pub github_sync_status: SyncStatus,
+    /// Whether the GitHub setup panel is open.
+    pub github_panel_open: bool,
+    _sync_task: Option<Task<()>>,
     _content_subscription: Subscription,
     _full_content_subscription: Subscription,
 }
@@ -101,6 +111,10 @@ impl AppState {
             view_mode: ViewMode::Wysiwyg,
             editor_state,
             full_editor_state,
+            github_config: None,
+            github_sync_status: SyncStatus::Idle,
+            github_panel_open: false,
+            _sync_task: None,
             _content_subscription: subscription,
             _full_content_subscription: full_subscription,
         }
@@ -160,6 +174,9 @@ impl AppState {
         self.blocks = vec![];
         self.active_block = None;
         self.dirty = false;
+        self.github_config = None;
+        self.github_sync_status = SyncStatus::Idle;
+        self.github_panel_open = false;
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
         self.full_editor_state.update(cx, |state, cx| state.set_content("", cx));
         cx.notify();
@@ -178,7 +195,71 @@ impl AppState {
         }
         self.document = doc;
         self.dirty = false;
+        self.github_sync_status = SyncStatus::Idle;
         cx.notify();
+    }
+
+    fn trigger_github_sync(&mut self, cx: &mut Context<AppState>) {
+        let Some(config) = self.github_config.clone() else {
+            self.github_sync_status = SyncStatus::Idle;
+            return;
+        };
+
+        let Some(path) = self.document.path.as_ref() else {
+            self.github_sync_status = SyncStatus::Failed {
+                message: "Missing local document path for sync".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+
+        let Some(filename) = path.file_name().and_then(|f| f.to_str()).map(|f| f.to_string()) else {
+            self.github_sync_status = SyncStatus::Failed {
+                message: "Invalid local filename for sync".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+
+        let token = match octodocs_github::get_stored_token() {
+            Ok(Some(token)) => token,
+            Ok(None) => {
+                self.github_sync_status = SyncStatus::Failed {
+                    message: "GitHub token not found. Please authenticate.".to_string(),
+                };
+                cx.notify();
+                return;
+            }
+            Err(err) => {
+                self.github_sync_status = SyncStatus::Failed {
+                    message: format!("GitHub token read failed: {err}"),
+                };
+                cx.notify();
+                return;
+            }
+        };
+
+        let content = self.document.content.clone();
+
+        self.github_sync_status = SyncStatus::Syncing;
+        cx.notify();
+
+        self._sync_task = Some(cx.spawn(async move |this, cx| {
+            let result = octodocs_github::push_file(&token, &config, &filename, &content);
+
+            let _ = this.update(cx, |state, cx| {
+                state.github_sync_status = match result {
+                    Ok(sha) => SyncStatus::Success {
+                        committed_at: SystemTime::now(),
+                        sha,
+                    },
+                    Err(err) => SyncStatus::Failed {
+                        message: err.to_string(),
+                    },
+                };
+                cx.notify();
+            });
+        }));
     }
 
     /// Save to the current path (falls back to save_as if no path set).
@@ -187,6 +268,7 @@ impl AppState {
             match octodocs_core::FileIo::save(&self.document) {
                 Ok(_) => {
                     self.dirty = false;
+                    self.trigger_github_sync(cx);
                     cx.notify();
                 }
                 Err(e) => eprintln!("Save error: {e}"),
@@ -208,6 +290,7 @@ impl AppState {
                 Ok(_) => {
                     self.document.path = Some(path);
                     self.dirty = false;
+                    self.trigger_github_sync(cx);
                     cx.notify();
                 }
                 Err(e) => eprintln!("Save-as error: {e}"),

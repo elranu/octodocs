@@ -68,12 +68,12 @@ References:
 
 ## Index
 
-- [ ] Phase 1: [New `octodocs-github` Crate](#phase-1-new-octodocs-github-crate)
-- [ ] Phase 2: [OAuth Device Flow & Token Persistence](#phase-2-oauth-device-flow--token-persistence)
-- [ ] Phase 3: [GitHub API — Repo/Branch/Folder Discovery](#phase-3-github-api--repobranch-folder-discovery)
-- [ ] Phase 4: [Auto-Push on Save](#phase-4-auto-push-on-save)
-- [ ] Phase 5: [UI — GitHub Setup Panel](#phase-5-ui--github-setup-panel)
-- [ ] Phase 6: [UI — Sync Status Badge](#phase-6-ui--sync-status-badge)
+- [x] Phase 1: [New `octodocs-github` Crate](#phase-1-new-octodocs-github-crate)
+- [x] Phase 2: [OAuth Device Flow & Token Persistence](#phase-2-oauth-device-flow--token-persistence)
+- [x] Phase 3: [GitHub API — Repo/Branch/Folder Discovery](#phase-3-github-api--repobranch-folder-discovery)
+- [x] Phase 4: [Auto-Push on Save](#phase-4-auto-push-on-save)
+- [x] Phase 5: [UI — GitHub Setup Panel](#phase-5-ui--github-setup-panel)
+- [x] Phase 6: [UI — Sync Status Badge](#phase-6-ui--sync-status-badge)
 - [ ] Phase 7: [Sidecar Config Persistence](#phase-7-sidecar-config-persistence)
 - [ ] Phase 8: [Testing](#phase-8-testing)
 
@@ -343,35 +343,35 @@ sequenceDiagram
 
 ### Phase 4: Auto-Push on Save
 
-- [ ] Implement `sync::get_file_sha(token, config, filename) -> anyhow::Result<Option<String>>` — calls `GET /repos/{owner}/{repo}/contents/{folder}/{filename}?ref={branch}`, extracts `sha` field; returns `None` for 404
-- [ ] Implement `sync::push_file(token, config, filename, content) -> anyhow::Result<String>` — calls `update_file(path, message, content_base64, sha)`, returns new commit SHA
+- [x] Implement `sync::get_file_sha(token, config, filename) -> anyhow::Result<Option<String>>` — calls `GET /repos/{owner}/{repo}/contents/{folder}/{filename}?ref={branch}`, extracts `sha` field; returns `None` for 404
+- [x] Implement `sync::push_file(token, config, filename, content) -> anyhow::Result<String>` — calls `update_file(path, message, content_base64, sha)`, returns new commit SHA
   - Commit message template: `"OctoDocs: update {filename}"` with UTC timestamp
-- [ ] In `AppState::save(cx)`:
+- [x] In `AppState::save(cx)`:
   1. Call `FileIo::save` (existing)
   2. If `self.github_config.is_some()` and token is loaded:
      - Set `self.github_sync_status = SyncStatus::Syncing` + `cx.notify()`
-     - Spawn `cx.background_executor().spawn(async move { ... })` capturing weak entity + config + token + content
+     - Spawn `cx.spawn()` capturing weak entity + config + token + content
      - On success: weak update to `SyncStatus::Success { ... }`
      - On failure: weak update to `SyncStatus::Failed { message }`
-- [ ] Store the `Task<()>` in `AppState::_sync_task: Option<Task<()>>` to prevent premature cancellation
+- [x] Store the `Task<()>` in `AppState::_sync_task: Option<Task<()>>` to prevent premature cancellation
 
 ### Phase 5: UI — GitHub Setup Panel
 
-- [ ] Create `views/github_panel.rs` — a modal-style overlay view or side panel, shown/hidden via `AppState::github_panel_open: bool`
-- [ ] Panel states (rendered as a vertical flow):
+- [x] Create `views/github_panel.rs` — a modal-style overlay view or side panel, shown/hidden via `AppState::github_panel_open: bool`
+- [x] Panel states (rendered as a vertical flow):
   - **Unauthenticated**: "Connect to GitHub" button → triggers device flow → shows code card with URL + `user_code` + progress spinner → on success transitions to Authenticated
   - **Authenticated**: avatar + username display, "Disconnect" button
   - **Repo selector**: searchable list of `RepoInfo` items (populated via `discovery::list_repos`)
   - **Branch selector**: dropdown of `BranchInfo` items for selected repo
   - **Folder selector**: nested expandable tree of `FolderEntry` items (lazy-loaded per expand)
   - **Confirm button**: "Sync this document here" → calls `AppState::set_github_config`
-- [ ] Loading states: spinner placeholder while async lists are fetching
-- [ ] All async calls are dispatched via `cx.background_executor()` with weak entity updates
+- [x] Loading states: spinner placeholder while async lists are fetching
+- [x] All async calls are dispatched via `cx.spawn()` with weak entity updates
 
 ### Phase 6: UI — Sync Status Badge
 
-- [ ] Add a `SyncBadge` component (inline in `root.rs` or a small struct) rendered in the toolbar right section
-- [ ] States:
+- [x] Add a `SyncBadge` component (inline in `root.rs` or a small struct) rendered in the toolbar right section
+- [x] States:
   | `SyncStatus` | Badge display |
   |---|---|
   | `Idle` (no config) | GitHub icon, muted color, tooltip "Not connected to GitHub" |
@@ -379,7 +379,7 @@ sequenceDiagram
   | `Syncing` | spinner icon, accent color |
   | `Success` | checkmark icon, success color, tooltip "Last synced {time}" |
   | `Failed` | warning icon, error color, tooltip "Sync failed: {message}" |
-- [ ] Clicking the badge opens the GitHub setup panel (same as toolbar button)
+- [x] Clicking the badge opens the GitHub setup panel (same as toolbar button)
 
 ### Phase 7: Sidecar Config Persistence
 

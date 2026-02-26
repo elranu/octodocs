@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 octodocs-core = { path = "../octodocs-core" }
+octodocs-github = { path = "../octodocs-github" }
 adabraka-ui = "0.3"
 gpui = { package = "adabraka-gpui", version = "0.3" }
 rfd = "0.15"
