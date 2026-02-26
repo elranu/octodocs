@@ -1,15 +1,18 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
 use octodocs_core::FileIo;
-use octodocs_github::SyncStatus;
+use octodocs_github::{get_stored_token, SyncStatus};
 
 use super::block_editor_pane::BlockEditorPane;
 use super::editor_pane::EditorPane;
-use super::github_panel::GitHubPanel;
+use super::github_auth_modal::GithubAuthModal;
+use super::github_sidebar::GithubSidebar;
 use super::preview_pane::PreviewPane;
+use super::repo_add_modal::RepoAddModal;
 use crate::app_state::AppState;
 
 pub struct RootView {
@@ -17,10 +20,12 @@ pub struct RootView {
     block_editor_pane: Entity<BlockEditorPane>,
     editor_pane: Entity<EditorPane>,
     preview_pane: Entity<PreviewPane>,
-    github_panel: Entity<GitHubPanel>,
+    github_sidebar: Entity<GithubSidebar>,
+    github_auth_modal: Entity<GithubAuthModal>,
+    repo_add_modal: Entity<RepoAddModal>,
     toolbar: Entity<Toolbar>,
     _pane_subscription: Subscription,
-    _github_panel_subscription: Subscription,
+    _root_subscription: Subscription,
 }
 
 impl RootView {
@@ -29,23 +34,39 @@ impl RootView {
         let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
-        let github_panel = cx.new(|cx| GitHubPanel::new(app_state.clone(), cx));
+        let github_sidebar = cx.new(|cx| GithubSidebar::new(app_state.clone(), cx));
+        let repo_add_modal = cx.new(|cx| RepoAddModal::new(app_state.clone(), cx));
+        let repo_modal_weak_for_auth = repo_add_modal.downgrade();
+        let github_auth_modal = cx.new(|_| {
+            GithubAuthModal::new(
+                app_state.clone(),
+                Box::new(move |token, cx| {
+                    let _ = repo_modal_weak_for_auth.update(cx, |modal, cx| {
+                        modal.set_auth_token(token, cx);
+                    });
+                }),
+            )
+        });
 
         // Re-render when AppState changes (content/block/mode changes).
         let pane_bep = block_editor_pane.clone();
         let pane_ep = editor_pane.clone();
         let pane_pp = preview_pane.clone();
+        let pane_sb = github_sidebar.clone();
         let subscription = cx.observe(&app_state, move |_, _, cx| {
             pane_bep.update(cx, |_, cx| cx.notify());
             pane_ep.update(cx, |_, cx| cx.notify());
             pane_pp.update(cx, |_, cx| cx.notify());
+            pane_sb.update(cx, |_, cx| cx.notify());
         });
 
-        // Also re-render root when AppState changes (for github_panel_open).
-        let github_panel_clone = github_panel.clone();
-        let github_panel_subscription = cx.observe(&app_state, move |_this, _, cx| {
+        // Re-render root and overlays when AppState changes.
+        let auth_modal_clone = github_auth_modal.clone();
+        let repo_modal_clone = repo_add_modal.clone();
+        let root_subscription = cx.observe(&app_state, move |_this, _, cx| {
             cx.notify();
-            github_panel_clone.update(cx, |_, cx| cx.notify());
+            auth_modal_clone.update(cx, |_, cx| cx.notify());
+            repo_modal_clone.update(cx, |_, cx| cx.notify());
         });
 
         // editor_weak targets the shared block editor — toolbar actions operate
@@ -119,15 +140,21 @@ impl RootView {
             is_dark_toggle.set(!is_dark_toggle.get());
         };
 
-        let github_panel_weak = github_panel.downgrade();
+        let github_auth_modal_weak = github_auth_modal.downgrade();
         let aw_github = app_weak.clone();
         let github_h = move |_w: &mut Window, cx: &mut App| {
             let _ = aw_github.update(cx, |state, cx| {
-                state.github_panel_open = !state.github_panel_open;
+                state.auth_modal_open = true;
                 cx.notify();
             });
-            // Initialize the panel when opening
-            let _ = github_panel_weak.update(cx, |panel, cx| panel.init(cx));
+            let _ = github_auth_modal_weak.update(cx, |modal, cx| modal.init(cx));
+        };
+
+        let aw_sidebar = app_weak.clone();
+        let sidebar_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw_sidebar.update(cx, |state, cx| {
+                state.toggle_sidebar(cx);
+            });
         };
 
         let toolbar = cx.new(|_| {
@@ -193,9 +220,16 @@ impl RootView {
                         .separator()
                         .button(
                             ToolbarButton::new("github", IconSource::Named("github".into()))
-                                .tooltip("GitHub Sync")
+                                .tooltip("GitHub Authentication")
                                 .on_click(github_h),
                         ),
+                )
+                .group(
+                    ToolbarGroup::new().button(
+                        ToolbarButton::new("sidebar", IconSource::Named("panel-left".into()))
+                            .tooltip("Toggle GitHub Sidebar")
+                            .on_click(sidebar_h),
+                    ),
                 )
         });
 
@@ -204,10 +238,12 @@ impl RootView {
             block_editor_pane,
             editor_pane,
             preview_pane,
-            github_panel,
+            github_sidebar,
+            github_auth_modal,
+            repo_add_modal,
             toolbar,
             _pane_subscription: subscription,
-            _github_panel_subscription: github_panel_subscription,
+            _root_subscription: root_subscription,
         }
     }
 }
@@ -220,10 +256,21 @@ impl Render for RootView {
         let word_count = app.document.word_count();
         let dirty = app.dirty;
         let view_mode = app.view_mode;
-        let github_panel_open = app.github_panel_open;
+        let auth_modal_open = app.auth_modal_open;
+        let repo_add_modal_open = app.repo_add_modal_open;
+        let sidebar_open = app.sidebar_open;
+        let show_unsaved_prompt = app.show_unsaved_prompt;
         let github_sync_status = app.github_sync_status.clone();
         let github_sync_configured = !app.github_bindings.is_empty();
         drop(app);
+
+        if repo_add_modal_open {
+            if let Ok(Some(token)) = get_stored_token() {
+                let _ = self.repo_add_modal.update(cx, |modal, cx| {
+                    modal.set_auth_token(token, cx);
+                });
+            }
+        }
 
         let dirty_dot = if dirty { "● " } else { "" };
 
@@ -242,8 +289,8 @@ impl Render for RootView {
             })
             .child(body_small(view_mode.label()));
 
-        // Sync status badge for status bar (clickable to open GitHub panel)
-        let github_panel_weak = self.github_panel.downgrade();
+        // Sync status badge for status bar (clickable to open auth modal)
+        let github_auth_modal_weak = self.github_auth_modal.downgrade();
         let app_weak_sync = self.app_state.downgrade();
         let sync_badge_content: AnyElement = match &github_sync_status {
             SyncStatus::Idle => div()
@@ -297,10 +344,10 @@ impl Render for RootView {
             .hover(|s| s.bg(theme.tokens.accent))
             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                 let _ = app_weak_sync.update(cx, |state, cx| {
-                    state.github_panel_open = !state.github_panel_open;
+                    state.auth_modal_open = true;
                     cx.notify();
                 });
-                let _ = github_panel_weak.update(cx, |panel, cx| panel.init(cx));
+                let _ = github_auth_modal_weak.update(cx, |modal, cx| modal.init(cx));
             })
             .child(sync_badge_content);
 
@@ -325,8 +372,8 @@ impl Render for RootView {
                     .child(body_small("UTF-8")),
             );
 
-        // Build content area based on view mode.
-        let content_area: AnyElement = match view_mode {
+        // Build editor area based on view mode.
+        let editor_area: AnyElement = match view_mode {
             crate::app_state::ViewMode::Wysiwyg => div()
                 .flex()
                 .flex_grow()
@@ -365,6 +412,110 @@ impl Render for RootView {
                 .into_any_element(),
         };
 
+        let content_area = div()
+            .flex()
+            .flex_row()
+            .flex_grow()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(editor_area),
+            )
+            .when(sidebar_open, |this| this.child(self.github_sidebar.clone()));
+
+        let app_weak_prompt_cancel_backdrop = self.app_state.downgrade();
+        let prompt_cancel_backdrop = move |_w: &mut Window, cx: &mut App| {
+            let _ = app_weak_prompt_cancel_backdrop.update(cx, |state, cx| {
+                state.pending_open_path = None;
+                state.show_unsaved_prompt = false;
+                cx.notify();
+            });
+        };
+
+        let app_weak_prompt_cancel_btn = self.app_state.downgrade();
+        let app_weak_prompt_discard_btn = self.app_state.downgrade();
+        let app_weak_prompt_save_btn = self.app_state.downgrade();
+
+        let unsaved_prompt_modal = ModalDialog::new()
+            .width(px(420.0))
+            .on_backdrop_click(prompt_cancel_backdrop)
+            .header(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .p(px(16.0))
+                    .border_b_1()
+                    .border_color(theme.tokens.border)
+                    .child(h4("Unsaved Changes")),
+            )
+            .content(
+                div()
+                    .p(px(16.0))
+                    .child(body("You have unsaved changes. Save before opening?")),
+            )
+            .footer(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .p(px(16.0))
+                    .border_t_1()
+                    .border_color(theme.tokens.border)
+                    .child(
+                        Button::new("unsaved-cancel", "Cancel")
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _w, cx| {
+                                let _ = app_weak_prompt_cancel_btn.update(cx, |state, cx| {
+                                    state.pending_open_path = None;
+                                    state.show_unsaved_prompt = false;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("unsaved-discard", "Discard")
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _w, cx| {
+                                let _ = app_weak_prompt_discard_btn.update(cx, |state, cx| {
+                                    state.dirty = false;
+                                    if let Some(path) = state.pending_open_path.take() {
+                                        match FileIo::open(&path) {
+                                            Ok(doc) => state.load_document(doc, cx),
+                                            Err(err) => eprintln!("Open error: {err}"),
+                                        }
+                                    }
+                                    state.show_unsaved_prompt = false;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("unsaved-save", "Save")
+                            .variant(ButtonVariant::Default)
+                            .on_click(move |_, _w, cx| {
+                                let _ = app_weak_prompt_save_btn.update(cx, |state, cx| {
+                                    state.save_as(cx);
+                                    if !state.dirty {
+                                        if let Some(path) = state.pending_open_path.take() {
+                                            match FileIo::open(&path) {
+                                                Ok(doc) => state.load_document(doc, cx),
+                                                Err(err) => eprintln!("Open error: {err}"),
+                                            }
+                                        }
+                                        state.show_unsaved_prompt = false;
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            );
+
         div()
             .flex()
             .flex_col()
@@ -373,8 +524,14 @@ impl Render for RootView {
             .child(self.toolbar.clone())
             .child(content_area)
             .child(status_bar)
-            .when(github_panel_open, |this| {
-                this.child(self.github_panel.clone())
+            .when(auth_modal_open, |this| {
+                this.child(self.github_auth_modal.clone())
+            })
+            .when(repo_add_modal_open, |this| {
+                this.child(self.repo_add_modal.clone())
+            })
+            .when(show_unsaved_prompt, |this| {
+                this.child(unsaved_prompt_modal)
             })
     }
 }

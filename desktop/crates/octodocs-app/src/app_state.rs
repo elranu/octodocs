@@ -23,6 +23,11 @@ pub enum ViewMode {
     Source,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostAuthAction {
+    AddRepo,
+}
+
 impl ViewMode {
     /// Cycle to the next mode in order: Wysiwyg → Split → Source → Wysiwyg.
     pub fn next(self) -> Self {
@@ -60,8 +65,20 @@ pub struct AppState {
     pub github_bindings: Vec<GitHubSyncBinding>,
     /// Runtime status of GitHub autosync.
     pub github_sync_status: SyncStatus,
-    /// Whether the GitHub setup panel is open.
-    pub github_panel_open: bool,
+    /// Whether the GitHub sidebar is open.
+    pub sidebar_open: bool,
+    /// Whether the GitHub auth modal is open.
+    pub auth_modal_open: bool,
+    /// Whether the repository add wizard modal is open.
+    pub repo_add_modal_open: bool,
+    /// Which GitHub binding is currently selected in the sidebar.
+    pub active_binding_idx: Option<usize>,
+    /// A path waiting to be opened after unsaved-change confirmation.
+    pub pending_open_path: Option<PathBuf>,
+    /// Whether to show unsaved-change confirmation before opening sidebar file.
+    pub show_unsaved_prompt: bool,
+    /// Action to perform after authentication succeeds.
+    pub pending_post_auth_action: Option<PostAuthAction>,
     _sync_task: Option<Task<()>>,
     _content_subscription: Subscription,
     _full_content_subscription: Subscription,
@@ -120,7 +137,13 @@ impl AppState {
             full_editor_state,
             github_bindings: vec![],
             github_sync_status: SyncStatus::Idle,
-            github_panel_open: false,
+            sidebar_open: false,
+            auth_modal_open: false,
+            repo_add_modal_open: false,
+            active_binding_idx: None,
+            pending_open_path: None,
+            show_unsaved_prompt: false,
+            pending_post_auth_action: None,
             _sync_task: None,
             _content_subscription: subscription,
             _full_content_subscription: full_subscription,
@@ -182,9 +205,43 @@ impl AppState {
         self.active_block = None;
         self.dirty = false;
         self.github_sync_status = SyncStatus::Idle;
-        self.github_panel_open = false;
+        self.sidebar_open = false;
+        self.auth_modal_open = false;
+        self.repo_add_modal_open = false;
+        self.active_binding_idx = None;
+        self.pending_open_path = None;
+        self.show_unsaved_prompt = false;
+        self.pending_post_auth_action = None;
         self.editor_state.update(cx, |state, cx| state.set_content("", cx));
         self.full_editor_state.update(cx, |state, cx| state.set_content("", cx));
+        cx.notify();
+    }
+
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<AppState>) {
+        self.sidebar_open = !self.sidebar_open;
+        cx.notify();
+    }
+
+    pub fn open_file_from_sidebar(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        if self.document.path.as_ref() == Some(&path) || !self.dirty {
+            match octodocs_core::FileIo::open(&path) {
+                Ok(doc) => self.load_document(doc, cx),
+                Err(err) => eprintln!("Open error: {err}"),
+            }
+            return;
+        }
+
+        if self.document.path.is_some() {
+            self.save(cx);
+            match octodocs_core::FileIo::open(&path) {
+                Ok(doc) => self.load_document(doc, cx),
+                Err(err) => eprintln!("Open error: {err}"),
+            }
+            return;
+        }
+
+        self.pending_open_path = Some(path);
+        self.show_unsaved_prompt = true;
         cx.notify();
     }
 
@@ -302,12 +359,16 @@ impl AppState {
         } else {
             self.github_bindings.push(GitHubSyncBinding { local_root, config });
         }
+        if self.active_binding_idx.is_none() && !self.github_bindings.is_empty() {
+            self.active_binding_idx = Some(0);
+        }
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
     }
 
     pub fn clear_github_bindings(&mut self, cx: &mut Context<AppState>) {
         self.github_bindings.clear();
+        self.active_binding_idx = None;
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
     }
