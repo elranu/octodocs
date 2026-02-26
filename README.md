@@ -1,4 +1,6 @@
-![OctoDocs Logo](assets/octoDocsFull.svg)
+<div align="center">
+<img src="assets/octoDocsFull.svg" alt="OctoDocs Logo" width="250" />
+</div>
 
 **A self-managed documentation editor backed by GitHub.**
 
