@@ -417,6 +417,7 @@ impl Render for RootView {
             .flex_row()
             .flex_grow()
             .min_h_0()
+            .when(sidebar_open, |this| this.child(self.github_sidebar.clone()))
             .child(
                 div()
                     .flex()
@@ -425,8 +426,7 @@ impl Render for RootView {
                     .min_w_0()
                     .min_h_0()
                     .child(editor_area),
-            )
-            .when(sidebar_open, |this| this.child(self.github_sidebar.clone()));
+            );
 
         let app_weak_prompt_cancel_backdrop = self.app_state.downgrade();
         let prompt_cancel_backdrop = move |_w: &mut Window, cx: &mut App| {

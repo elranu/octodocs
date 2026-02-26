@@ -85,6 +85,69 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn bindings_store_path() -> Option<PathBuf> {
+        let base = dirs::config_dir()
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?;
+        Some(base.join("octodocs").join("github_bindings.tsv"))
+    }
+
+    fn load_github_bindings_from_disk() -> Vec<GitHubSyncBinding> {
+        let Some(path) = Self::bindings_store_path() else {
+            return vec![];
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return vec![];
+        };
+
+        content
+            .lines()
+            .filter_map(|line| {
+                let parts = line.split('\t').collect::<Vec<_>>();
+                if parts.len() != 5 {
+                    return None;
+                }
+                Some(GitHubSyncBinding {
+                    local_root: PathBuf::from(parts[4]),
+                    config: GitHubSyncConfig {
+                        owner: parts[0].to_string(),
+                        repo: parts[1].to_string(),
+                        branch: parts[2].to_string(),
+                        folder: parts[3].to_string(),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    fn persist_github_bindings_to_disk(&self) {
+        let Some(path) = Self::bindings_store_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+
+        let body = self
+            .github_bindings
+            .iter()
+            .map(|binding| {
+                format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    binding.config.owner,
+                    binding.config.repo,
+                    binding.config.branch,
+                    binding.config.folder,
+                    binding.local_root.display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let _ = std::fs::write(path, body);
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let default_content = "# Welcome to OctoDocs\n\nStart typing **Markdown** here and watch the preview update live.\n\n## Features\n\n- Live preview\n- Open, save, and create `.md` files\n- Mermaid diagram support\n\n## Example\n\n> This is a blockquote.\n\n```mermaid\ngraph TD\n    A[Start] --> B[Edit Markdown]\n    B --> C[Preview updates]\n```\n";
 
@@ -127,6 +190,9 @@ impl AppState {
 
         let blocks = Renderer::parse_blocks(default_content);
 
+        let github_bindings = Self::load_github_bindings_from_disk();
+        let active_binding_idx = if github_bindings.is_empty() { None } else { Some(0) };
+
         Self {
             document: Document::with_content(default_content),
             blocks,
@@ -135,12 +201,12 @@ impl AppState {
             view_mode: ViewMode::Wysiwyg,
             editor_state,
             full_editor_state,
-            github_bindings: vec![],
+            github_bindings,
             github_sync_status: SyncStatus::Idle,
             sidebar_open: false,
             auth_modal_open: false,
             repo_add_modal_open: false,
-            active_binding_idx: None,
+            active_binding_idx,
             pending_open_path: None,
             show_unsaved_prompt: false,
             pending_post_auth_action: None,
@@ -362,6 +428,7 @@ impl AppState {
         if self.active_binding_idx.is_none() && !self.github_bindings.is_empty() {
             self.active_binding_idx = Some(0);
         }
+        self.persist_github_bindings_to_disk();
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
     }
@@ -369,6 +436,7 @@ impl AppState {
     pub fn clear_github_bindings(&mut self, cx: &mut Context<AppState>) {
         self.github_bindings.clear();
         self.active_binding_idx = None;
+        self.persist_github_bindings_to_disk();
         self.github_sync_status = SyncStatus::Idle;
         cx.notify();
     }

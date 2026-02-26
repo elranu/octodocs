@@ -250,6 +250,16 @@ impl GithubSidebar {
             state.active_binding_idx = Some(idx);
             cx.notify();
         });
+        let selected_root = self
+            .app_state
+            .read(cx)
+            .github_bindings
+            .get(idx)
+            .map(|binding| binding.local_root.clone());
+        if let Some(root) = selected_root {
+            self.focused_dir = Some(root);
+            self.expanded_dirs.clear();
+        }
         self.repo_dropdown_open = false;
         cx.notify();
     }
@@ -368,6 +378,9 @@ impl Render for GithubSidebar {
 
         let file_explorer: AnyElement = if let Some(active) = active_idx {
             let local_root = bindings[active].local_root.clone();
+            if !local_root.exists() {
+                let _ = std::fs::create_dir_all(&local_root);
+            }
             let mut rows = Vec::new();
             self.push_tree_rows(&local_root, 0, &mut rows, &weak);
 
@@ -376,6 +389,11 @@ impl Render for GithubSidebar {
                 .clone()
                 .filter(|path| path.starts_with(&local_root))
                 .unwrap_or(local_root.clone());
+            let current_folder_name = current_folder
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| current_folder.display().to_string());
 
             let new_file_weak = weak.clone();
             let new_folder_weak = weak.clone();
@@ -434,7 +452,7 @@ impl Render for GithubSidebar {
                         .justify_between()
                         .child(body_small("Files"))
                         .child(
-                            body_small(current_folder.display().to_string())
+                            body_small(current_folder_name)
                                 .color(theme.tokens.muted_foreground),
                         ),
                 )
