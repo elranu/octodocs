@@ -1,12 +1,10 @@
-# OctoDocs
+![OctoDocs Logo](assets/octoDocsFull.svg)
 
 **A self-managed documentation editor backed by GitHub.**
 
 I always wanted a tool where I could write, organize, and navigate my documentation — and have it automatically backed up to a GitHub repository, with zero configuration beyond "log in and pick a repo." No terminal. No git commands. No merge conflicts. Just open the app, write, and everything syncs.
 
 OctoDocs is that tool. It's a native desktop Markdown editor built for **everyone** — whether you're a developer who lives in the terminal or someone who has never heard of git. The experience is the same: a clean WYSIWYG editor where you write formatted text, and your files are safely stored in a GitHub repo behind the scenes.
-
-![OctoDocs screenshot](Screenshot%20from%202026-02-26%2001-29-31.png)
 
 ---
 
