@@ -245,7 +245,10 @@ impl AppState {
         cx.notify();
 
         self._sync_task = Some(cx.spawn(async move |this, cx| {
-            let result = octodocs_github::push_file(&token, &config, &filename, &content);
+            let result = cx
+                .background_executor()
+                .spawn(async move { octodocs_github::push_file(&token, &config, &filename, &content) })
+                .await;
 
             let _ = this.update(cx, |state, cx| {
                 state.github_sync_status = match result {

@@ -2,7 +2,7 @@
 
 use adabraka_ui::prelude::*;
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
-use gpui::{Task, WeakEntity};
+use gpui::{ClipboardItem, Task, WeakEntity};
 use octodocs_github::{
     start_device_flow, wait_for_token, get_stored_token, store_token, clear_stored_token,
     list_repos, list_branches, list_folder,
@@ -11,10 +11,45 @@ use octodocs_github::{
 
 use crate::app_state::AppState;
 
-/// GitHub OAuth App client ID (hardcoded for now, can be env var later).
+/// GitHub OAuth App client ID from runtime environment.
 /// This is NOT a secret for Device Flow - only client_secret is secret.
-fn github_client_id() -> Option<&'static str> {
-    option_env!("GITHUB_CLIENT_ID").filter(|value| !value.trim().is_empty())
+fn github_client_id() -> Option<String> {
+    std::env::var("GITHUB_CLIENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn open_external_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("xdg-open failed: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("open failed: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|e| format!("start failed: {e}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Opening links is not supported on this OS".to_string())
 }
 
 /// Panel states for the multi-step setup flow.
@@ -98,19 +133,22 @@ impl GitHubPanel {
     pub fn start_auth(&mut self, cx: &mut Context<Self>) {
         let Some(client_id) = github_client_id() else {
             self.state = PanelState::Error {
-                message: "GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and rebuild the app.".to_string(),
+                message: "GitHub OAuth is not configured. Set GITHUB_CLIENT_ID (supports .env) and restart the app.".to_string(),
             };
             cx.notify();
             return;
         };
 
-        let client_id = client_id.to_string();
         self.state = PanelState::Loading;
         cx.notify();
 
         let weak = cx.entity().downgrade();
         self._task = Some(cx.spawn(async move |_, cx| {
-            let handle = start_device_flow(&client_id, &["repo"]);
+            let client_id_for_request = client_id.clone();
+            let handle = cx
+                .background_executor()
+                .spawn(async move { start_device_flow(&client_id_for_request, &["repo"]) })
+                .await;
 
             let _ = weak.update(cx, |panel, cx| {
                 match handle {
@@ -120,7 +158,7 @@ impl GitHubPanel {
                             verification_uri: h.verification_uri.clone(),
                         };
                         cx.notify();
-                        panel.poll_for_auth(client_id, h, cx);
+                        panel.poll_for_auth(client_id.clone(), h, cx);
                     }
                     Err(e) => {
                         panel.state = PanelState::Error {
@@ -137,7 +175,11 @@ impl GitHubPanel {
     fn poll_for_auth(&mut self, client_id: String, handle: DeviceFlowHandle, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
         self._task = Some(cx.spawn(async move |_, cx| {
-            let result = wait_for_token(&client_id, &handle);
+            let client_id_for_poll = client_id.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { wait_for_token(&client_id_for_poll, &handle) })
+                .await;
 
             let _ = weak.update(cx, |panel, cx| {
                 match result {
@@ -181,7 +223,10 @@ impl GitHubPanel {
                 return;
             };
 
-            let repos = list_repos(&token);
+            let repos = cx
+                .background_executor()
+                .spawn(async move { list_repos(&token) })
+                .await;
 
             let _ = weak.update(cx, |panel, cx| {
                 match repos {
@@ -223,7 +268,10 @@ impl GitHubPanel {
                 return;
             };
 
-            let branches = list_branches(&token, &owner, &name);
+            let branches = cx
+                .background_executor()
+                .spawn(async move { list_branches(&token, &owner, &name) })
+                .await;
 
             let _ = weak.update(cx, |panel, cx| {
                 match branches {
@@ -272,7 +320,10 @@ impl GitHubPanel {
                 return;
             };
 
-            let folders = list_folder(&token, &owner, &name, &branch_clone, "");
+            let folders = cx
+                .background_executor()
+                .spawn(async move { list_folder(&token, &owner, &name, &branch_clone, "") })
+                .await;
 
             let _ = weak.update(cx, |panel, cx| {
                 match folders {
@@ -316,6 +367,8 @@ impl GitHubPanel {
         let weak = cx.entity().downgrade();
         let owner = repo.owner.clone();
         let name = repo.name.clone();
+        let branch_for_request = branch.clone();
+        let folder_path_for_request = folder_path.clone();
 
         self._task = Some(cx.spawn(async move |_, cx| {
             let token = get_stored_token().ok().flatten();
@@ -327,7 +380,12 @@ impl GitHubPanel {
                 return;
             };
 
-            let folders = list_folder(&token, &owner, &name, &branch, &folder_path);
+            let folders = cx
+                .background_executor()
+                .spawn(async move {
+                    list_folder(&token, &owner, &name, &branch_for_request, &folder_path_for_request)
+                })
+                .await;
 
             let _ = weak.update(cx, |panel, cx| {
                 match folders {
@@ -526,6 +584,9 @@ impl GitHubPanel {
             PanelState::DeviceFlow { user_code, verification_uri } => {
                 let code = user_code.clone();
                 let uri = verification_uri.clone();
+                let open_weak = weak.clone();
+                let uri_for_open = uri.clone();
+                let code_for_copy = code.clone();
 
                 div()
                     .flex()
@@ -537,20 +598,38 @@ impl GitHubPanel {
                     .child(body("Enter this code on GitHub:"))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
                             .px(px(24.0))
                             .py(px(12.0))
                             .bg(theme.tokens.muted)
                             .rounded(px(8.0))
                             .child(h2(&code))
+                            .child(
+                                IconButton::new(IconSource::Named("copy".into()))
+                                    .size(px(28.0))
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _w, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(code_for_copy.clone()));
+                                    })
+                            )
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(body_small(&uri))
-                            .child(Icon::new(IconSource::Named("external-link".into())).size_3())
+                        Button::new("open-verification-page", "Open verification page")
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _w, cx| {
+                                let _ = open_weak.update(cx, |panel, cx| {
+                                    if let Err(err) = open_external_url(&uri_for_open) {
+                                        panel.state = PanelState::Error {
+                                            message: format!("Failed to open browser: {err}"),
+                                        };
+                                        cx.notify();
+                                    }
+                                });
+                            })
                     )
+                    .child(body_small(&uri).color(theme.tokens.muted_foreground))
                     .child(body_small("Waiting for authorization...").color(theme.tokens.muted_foreground))
                     .into_any_element()
             }

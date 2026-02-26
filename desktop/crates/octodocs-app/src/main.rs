@@ -44,6 +44,7 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    let _ = dotenvy::dotenv();
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     Application::new()

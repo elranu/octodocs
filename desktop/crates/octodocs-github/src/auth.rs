@@ -263,7 +263,8 @@ pub fn store_token(token: &str) -> Result<()> {
 pub fn get_stored_token() -> Result<Option<String>> {
     let keyring = KeyringStore;
     match keyring.get_token() {
-        Ok(token) => Ok(token),
+        Ok(Some(token)) => Ok(Some(token)),
+        Ok(None) => FileStore::default().get_token(),
         Err(_) => FileStore::default().get_token(),
     }
 }
