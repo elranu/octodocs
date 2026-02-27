@@ -39,7 +39,7 @@ struct CommitInfo {
     sha: String,
 }
 
-fn build_repo_path(config: &GitHubSyncConfig, filename: &str) -> String {
+pub(crate) fn build_repo_path(config: &GitHubSyncConfig, filename: &str) -> String {
     let folder = config.folder.trim_matches('/');
     if folder.is_empty() {
         filename.to_string()

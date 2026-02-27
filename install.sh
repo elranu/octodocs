@@ -49,13 +49,15 @@ main() {
     fi
 
     temp="$(mktemp -d)"
+    # Ensure the temp dir is cleaned up on exit (success or error)
+    trap 'rm -rf "$temp"' EXIT
     tarball="$temp/octodocs-linux-x86_64.tar.gz"
 
     echo "Downloading OctoDocs..."
     download "https://github.com/$REPO/releases/latest/download/octodocs-linux-x86_64.tar.gz" > "$tarball"
 
     echo "Installing to $INSTALL_DIR..."
-    rm -rf "$INSTALL_DIR"
+    # Only overwrite files from the package; do not wipe the entire install dir
     mkdir -p "$INSTALL_DIR"
     tar -xzf "$tarball" -C "$INSTALL_DIR"
 

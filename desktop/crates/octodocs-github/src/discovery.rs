@@ -272,6 +272,24 @@ pub fn pull_markdown_files(
     Ok(out)
 }
 
+/// Percent-encode each segment of a repo path (preserving `/` separators).
+fn percent_encode_path(path: &str) -> String {
+    path.split('/')
+        .map(|seg| {
+            seg.bytes()
+                .flat_map(|b| {
+                    if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                        vec![b as char]
+                    } else {
+                        format!("%{b:02X}").chars().collect::<Vec<_>>()
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Fetch a single file from GitHub, returning `None` if the file does not exist (404).
 /// Remote content is returned as a UTF-8 string on success.
 /// The path within the repo is resolved from `config.folder` + `filename`.
@@ -280,17 +298,13 @@ pub fn pull_file(
     config: &GitHubSyncConfig,
     filename: &str,
 ) -> Result<Option<String>> {
-    let folder = config.folder.trim_matches('/');
-    let repo_path = if folder.is_empty() {
-        filename.to_string()
-    } else {
-        format!("{folder}/{filename}")
-    };
+    let repo_path = crate::sync::build_repo_path(config, filename);
+    let encoded_path = percent_encode_path(&repo_path);
 
     let client = client::build(token)?;
     let url = format!(
         "{API_BASE}/repos/{}/{}/contents/{}?ref={}",
-        config.owner, config.repo, repo_path, config.branch
+        config.owner, config.repo, encoded_path, config.branch
     );
 
     let response = client

@@ -169,6 +169,8 @@ jobs:
     # Run even if macOS/Windows jobs failed — they're continue-on-error
     if: always() && needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Download Linux artifact (required)
@@ -179,6 +181,7 @@ jobs:
 
       - name: Download macOS artifact (optional)
         if: needs.build-macos.result == 'success'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: octodocs-macos-aarch64.dmg
@@ -186,6 +189,7 @@ jobs:
 
       - name: Download Windows artifact (optional)
         if: needs.build-windows.result == 'success'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: octodocs-windows-x86_64.zip

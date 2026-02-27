@@ -86,6 +86,7 @@ pub struct AppState {
     pub pending_post_auth_action: Option<PostAuthAction>,
     _import_summary_version: u64,
     _sync_task: Option<Task<()>>,
+    _pull_task: Option<Task<()>>,
     _summary_task: Option<Task<()>>,
     _doc_editor_subscription: Subscription,
     _full_content_subscription: Subscription,
@@ -303,6 +304,7 @@ impl AppState {
             loading_doc: 1,
             _import_summary_version: 0,
             _sync_task: None,
+            _pull_task: None,
             _summary_task: None,
             _doc_editor_subscription: doc_editor_sub,
             _full_content_subscription: full_subscription,
@@ -435,7 +437,7 @@ impl AppState {
         self.github_sync_status = SyncStatus::Syncing;
         cx.notify();
 
-        self._sync_task = Some(cx.spawn(async move |this, cx| {
+        self._pull_task = Some(cx.spawn(async move |this, cx| {
             let path_fallback = path.clone();
 
             let result: anyhow::Result<(bool, Document)> = cx
@@ -456,15 +458,8 @@ impl AppState {
                 .await;
 
             let _ = this.update(cx, |state, cx| match result {
-                Ok((pulled, doc)) => {
-                    state.github_sync_status = if pulled {
-                        SyncStatus::Success {
-                            committed_at: std::time::SystemTime::now(),
-                            sha: String::new(),
-                        }
-                    } else {
-                        SyncStatus::Idle
-                    };
+                Ok((_pulled, doc)) => {
+                    state.github_sync_status = SyncStatus::Idle;
                     state.load_document(doc, cx);
                 }
                 Err(err) => {
