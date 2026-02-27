@@ -75,7 +75,28 @@ fn main() {
                         install_theme(cx, Theme::light());
                     }
 
-                    cx.new(|cx| RootView::new(cx, initial_is_dark))
+                    let root = cx.new(|cx| RootView::new(cx, initial_is_dark));
+
+                    // When the user tries to close the window while there are unsaved
+                    // changes, surface the in-app modal instead of a blocking rfd dialog.
+                    let app_state = root.read(cx).app_state.clone();
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        let dirty = app_state.read(cx).dirty;
+                        if !dirty {
+                            return true;
+                        }
+                        // Set the pending-close flag and open the existing unsaved-prompt
+                        // modal. The modal's Save/Discard buttons call cx.quit() when
+                        // pending_window_close is set.
+                        let _ = app_state.update(cx, |state, cx| {
+                            state.pending_window_close = true;
+                            state.show_unsaved_prompt = true;
+                            cx.notify();
+                        });
+                        false // keep the window open until the user responds
+                    });
+
+                    root
                 },
             )
             .unwrap();

@@ -107,6 +107,7 @@ pub fn init(cx: &mut gpui::App) {
     components::select::init_select(cx);
     components::combobox::init_combobox(cx);
     components::editor::init(cx);
+    components::document_editor::init(cx);
     navigation::sidebar::init_sidebar(cx);
     overlays::popover::init(cx);
     overlays::sheet::init_sheet(cx);

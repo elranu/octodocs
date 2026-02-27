@@ -265,6 +265,7 @@ impl RenderOnce for Text {
             .font_weight(weight)
             .text_color(text_color)
             .line_height(relative(line_height))
+            .when(self.italic, |this| this.italic())
             .when(self.underline, |this| this.underline())
             .when(!self.wrap, |this| this.whitespace_nowrap())
             .when(self.truncate, |this| this.overflow_hidden().text_ellipsis())

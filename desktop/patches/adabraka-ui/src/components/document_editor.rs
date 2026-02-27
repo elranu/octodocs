@@ -1,0 +1,2306 @@
+//! Word-style continuous document editor.
+//!
+//! One `Entity<DocumentEditorState>` owns the full document as `Vec<DocParagraph>`.
+//! A single cursor and optional selection span across the whole document.
+//! `DocumentEditorElement` is a custom GPUI element that shapes and paints all
+//! visual lines, registers the input handler, and handles mouse clicks.
+
+use crate::theme::use_theme;
+use gpui::*;
+use octodocs_core::{
+    doc_paragraphs_to_markdown, DocCursor, DocParagraph, DocSelection, InlineFormat, InlineSpan,
+    ParagraphKind,
+};
+use std::ops::Range;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Actions
+// ─────────────────────────────────────────────────────────────────────────────
+
+actions!(
+    document_editor,
+    [
+        MoveUp,
+        MoveDown,
+        MoveLeft,
+        MoveRight,
+        MoveToLineStart,
+        MoveToLineEnd,
+        MoveToDocStart,
+        MoveToDocEnd,
+        SelectLeft,
+        SelectRight,
+        SelectUp,
+        SelectDown,
+        SelectToLineStart,
+        SelectToLineEnd,
+        SelectAll,
+        Backspace,
+        Delete,
+        Enter,
+        Tab,
+        Copy,
+        Cut,
+        Paste,
+    ]
+);
+
+/// Register key bindings. Call once from `adabraka_ui::init`.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", MoveUp, Some("DocumentEditor")),
+        KeyBinding::new("down", MoveDown, Some("DocumentEditor")),
+        KeyBinding::new("left", MoveLeft, Some("DocumentEditor")),
+        KeyBinding::new("right", MoveRight, Some("DocumentEditor")),
+        KeyBinding::new("home", MoveToLineStart, Some("DocumentEditor")),
+        KeyBinding::new("end", MoveToLineEnd, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-up", MoveToDocStart, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-home", MoveToDocStart, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-down", MoveToDocEnd, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-end", MoveToDocEnd, Some("DocumentEditor")),
+        KeyBinding::new("shift-left", SelectLeft, Some("DocumentEditor")),
+        KeyBinding::new("shift-right", SelectRight, Some("DocumentEditor")),
+        KeyBinding::new("shift-up", SelectUp, Some("DocumentEditor")),
+        KeyBinding::new("shift-down", SelectDown, Some("DocumentEditor")),
+        KeyBinding::new("shift-home", SelectToLineStart, Some("DocumentEditor")),
+        KeyBinding::new("shift-end", SelectToLineEnd, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-a", SelectAll, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-a", SelectAll, Some("DocumentEditor")),
+        KeyBinding::new("backspace", Backspace, Some("DocumentEditor")),
+        KeyBinding::new("delete", Delete, Some("DocumentEditor")),
+        KeyBinding::new("enter", Enter, Some("DocumentEditor")),
+        KeyBinding::new("tab", Tab, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-c", Copy, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-c", Copy, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-x", Cut, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-x", Cut, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-v", Paste, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-v", Paste, Some("DocumentEditor")),
+    ]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visual line cache  (rebuilt each paint frame, stored in state)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Layout info for one visual line (one `\n`-delimited subline of a paragraph).
+#[derive(Debug, Clone)]
+pub struct VisualLine {
+    pub para_idx: usize,
+    /// Character offset (within the paragraph's plain-text) of the first char.
+    pub char_start: usize,
+    /// Character offset (within the paragraph's plain-text) of the first char
+    /// on the *next* visual line (i.e., char_start of the next line, or
+    /// `para.char_count()` for the last line).  The `\n` separator itself is
+    /// not counted.
+    pub char_end: usize,
+    /// y-coordinate of the top edge, in document (scroll-content) coordinates.
+    pub top_px: f32,
+    pub height_px: f32,
+    pub font_size_px: f32,
+    pub is_mermaid: bool,
+    /// x-positions (relative to the left margin, in logical pixels) of each
+    /// character's left edge.  Length = char_count + 1; the last entry is the
+    /// right edge of the last character (= where a cursor after EOF would sit).
+    /// Empty for mermaid blocks.
+    pub glyph_xs: Vec<Pixels>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DocumentEditorState
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub struct DocumentEditorState {
+    pub focus_handle: FocusHandle,
+    pub paragraphs: Vec<DocParagraph>,
+    pub cursor: DocCursor,
+    pub selection: Option<DocSelection>,
+    /// UTF-8 byte range (relative to the current paragraph) for IME composition.
+    pub marked_range: Option<Range<usize>>,
+    /// Layout cache rebuilt every paint pass.
+    pub layout_cache: Vec<VisualLine>,
+    /// Last known element bounds (used for `bounds_for_range` in IME).
+    pub last_bounds: Option<Bounds<Pixels>>,
+    /// Anchor set on mouse-down; drives click-and-drag text selection.
+    pub drag_anchor: Option<DocCursor>,
+    /// True once the mouse has moved with the left button held (distinguishes
+    /// a drag from a simple click so we know whether to clear the selection).
+    pub drag_occurred: bool,
+    /// Active table cell: (row, col) where row=0 is the header row.
+    /// Set when the user clicks on a table cell or navigates with Tab.
+    pub table_cursor: Option<(usize, usize)>,
+}
+
+impl DocumentEditorState {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            paragraphs: vec![DocParagraph::empty()],
+            cursor: DocCursor::zero(),
+            selection: None,
+            marked_range: None,
+            layout_cache: Vec::new(),
+            last_bounds: None,
+            drag_anchor: None,
+            drag_occurred: false,
+            table_cursor: None,
+        }
+    }
+
+    /// Replace the document content. Cursor resets to the beginning.
+    pub fn load_document(&mut self, paragraphs: Vec<DocParagraph>, cx: &mut Context<Self>) {
+        self.paragraphs = if paragraphs.is_empty() {
+            vec![DocParagraph::empty()]
+        } else {
+            paragraphs
+        };
+        self.cursor = DocCursor::zero();
+        self.selection = None;
+        self.marked_range = None;
+        self.layout_cache.clear();
+        self.drag_anchor = None;
+        self.drag_occurred = false;
+        self.table_cursor = None;
+        cx.notify();
+    }
+
+    /// Serialise the rich model back to Markdown.
+    pub fn to_markdown(&self) -> String {
+        doc_paragraphs_to_markdown(&self.paragraphs)
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn num_paras(&self) -> usize {
+        self.paragraphs.len()
+    }
+
+    fn para_char_count(&self, para_idx: usize) -> usize {
+        self.paragraphs[para_idx].char_count()
+    }
+
+    /// Find which visual line contains the given cursor position.
+    fn visual_line_for_cursor(&self, c: DocCursor) -> Option<&VisualLine> {
+        self.layout_cache.iter().find(|vl| {
+            vl.para_idx == c.para_idx
+                && c.char_offset >= vl.char_start
+                && c.char_offset <= vl.char_end
+        })
+    }
+
+    // ── Span / text mutation helpers ─────────────────────────────────────────
+
+    /// Merge adjacent spans that share the same format and drop empty spans.
+    fn merge_adjacent_spans(spans: &mut Vec<InlineSpan>) {
+        let mut merged: Vec<InlineSpan> = Vec::with_capacity(spans.len());
+        for span in spans.drain(..) {
+            if span.text.is_empty() {
+                continue;
+            }
+            if let Some(last) = merged.last_mut() {
+                if last.format == span.format {
+                    last.text.push_str(&span.text);
+                    continue;
+                }
+            }
+            merged.push(span);
+        }
+
+        if merged.is_empty() {
+            merged.push(InlineSpan {
+                text: String::new(),
+                format: InlineFormat::Plain,
+            });
+        }
+        *spans = merged;
+    }
+
+    fn split_text_at_char(text: &str, at: usize) -> (String, String) {
+        let mut before = String::new();
+        let mut after = String::new();
+        for (i, ch) in text.chars().enumerate() {
+            if i < at {
+                before.push(ch);
+            } else {
+                after.push(ch);
+            }
+        }
+        (before, after)
+    }
+
+    fn split_spans_at_char(spans: &[InlineSpan], at: usize) -> (Vec<InlineSpan>, Vec<InlineSpan>) {
+        let mut left: Vec<InlineSpan> = Vec::new();
+        let mut right: Vec<InlineSpan> = Vec::new();
+
+        let mut char_pos = 0usize;
+        for span in spans {
+            let span_len = span.text.chars().count();
+            let span_start = char_pos;
+            let span_end = span_start + span_len;
+
+            if at <= span_start {
+                right.push(InlineSpan {
+                    text: span.text.clone(),
+                    format: span.format,
+                });
+            } else if at >= span_end {
+                left.push(InlineSpan {
+                    text: span.text.clone(),
+                    format: span.format,
+                });
+            } else {
+                let split_at = at - span_start;
+                let (before, after) = Self::split_text_at_char(&span.text, split_at);
+                if !before.is_empty() {
+                    left.push(InlineSpan {
+                        text: before,
+                        format: span.format,
+                    });
+                }
+                if !after.is_empty() {
+                    right.push(InlineSpan {
+                        text: after,
+                        format: span.format,
+                    });
+                }
+            }
+            char_pos = span_end;
+        }
+
+        Self::merge_adjacent_spans(&mut left);
+        Self::merge_adjacent_spans(&mut right);
+        (left, right)
+    }
+
+    /// Higher-level helper: insert `text` at `DocCursor`, return new cursor.
+    fn do_insert(&mut self, at: DocCursor, text: &str) -> DocCursor {
+        if text.is_empty() {
+            return at;
+        }
+
+        let para = &mut self.paragraphs[at.para_idx];
+        let (mut left, mut right) = Self::split_spans_at_char(&para.spans, at.char_offset);
+        let insertion_format = left
+            .last()
+            .map(|s| s.format)
+            .or_else(|| right.first().map(|s| s.format))
+            .unwrap_or(InlineFormat::Plain);
+
+        left.push(InlineSpan {
+            text: text.to_string(),
+            format: insertion_format,
+        });
+        left.append(&mut right);
+        Self::merge_adjacent_spans(&mut left);
+        para.spans = left;
+
+        let new_char_offset = at.char_offset + text.chars().count();
+        DocCursor { para_idx: at.para_idx, char_offset: new_char_offset }
+    }
+
+    /// Remove `count` chars starting at `at`, return new cursor.
+    fn do_delete_chars(&mut self, at: DocCursor, count: usize) -> DocCursor {
+        if count == 0 {
+            return at;
+        }
+
+        let para = &mut self.paragraphs[at.para_idx];
+        let (mut left, tail) = Self::split_spans_at_char(&para.spans, at.char_offset);
+        let (_, mut right) = Self::split_spans_at_char(&tail, count);
+        left.append(&mut right);
+        Self::merge_adjacent_spans(&mut left);
+        para.spans = left;
+        at
+    }
+
+    /// Get selected text as a String (or empty if no selection).
+    fn selected_text(&self) -> String {
+        let Some(sel) = self.selection else { return String::new(); };
+        let (start, end) = sel.ordered();
+        if start.para_idx == end.para_idx {
+            let flat = self.paragraphs[start.para_idx].plain_text();
+            flat.chars().skip(start.char_offset).take(end.char_offset - start.char_offset).collect()
+        } else {
+            let mut s = String::new();
+            // First paragraph (partial)
+            let first_flat = self.paragraphs[start.para_idx].plain_text();
+            s.extend(first_flat.chars().skip(start.char_offset));
+            s.push('\n');
+            // Middle paragraphs (full)
+            for pi in start.para_idx + 1..end.para_idx {
+                s.push_str(&self.paragraphs[pi].plain_text());
+                s.push('\n');
+            }
+            // Last paragraph (partial)
+            let last_flat = self.paragraphs[end.para_idx].plain_text();
+            s.extend(last_flat.chars().take(end.char_offset));
+            s
+        }
+    }
+
+    /// Delete the current selection, return new cursor position (at selection start).
+    fn delete_selection(&mut self, cx: &mut Context<Self>) -> DocCursor {
+        let Some(sel) = self.selection.take() else { return self.cursor; };
+        let (start, end) = sel.ordered();
+
+        if start.para_idx == end.para_idx {
+            let count = end.char_offset - start.char_offset;
+            return self.do_delete_chars(start, count);
+        }
+
+        // Multi-paragraph selection: collapse by joining edges
+        // Truncate the start paragraph at the selection start
+        {
+            let (mut start_left, _) =
+                Self::split_spans_at_char(&self.paragraphs[start.para_idx].spans, start.char_offset);
+            let (_, mut end_right) =
+                Self::split_spans_at_char(&self.paragraphs[end.para_idx].spans, end.char_offset);
+            start_left.append(&mut end_right);
+            Self::merge_adjacent_spans(&mut start_left);
+            self.paragraphs[start.para_idx].spans = start_left;
+        }
+        // Remove the in-between and end paragraphs
+        self.paragraphs.drain(start.para_idx + 1..=end.para_idx);
+        cx.notify();
+        start
+    }
+
+    // ── Cursor movement ───────────────────────────────────────────────────────
+
+    pub fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sel) = self.selection.take() {
+            self.cursor = sel.ordered().0;
+        } else if self.cursor.char_offset > 0 {
+            self.cursor.char_offset -= 1;
+        } else if self.cursor.para_idx > 0 {
+            self.cursor.para_idx -= 1;
+            self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
+        }
+        cx.notify();
+    }
+
+    pub fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sel) = self.selection.take() {
+            self.cursor = sel.ordered().1;
+        } else {
+            let len = self.para_char_count(self.cursor.para_idx);
+            if self.cursor.char_offset < len {
+                self.cursor.char_offset += 1;
+            } else if self.cursor.para_idx + 1 < self.num_paras() {
+                self.cursor.para_idx += 1;
+                self.cursor.char_offset = 0;
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        if let Some(cur_vl) = self.visual_line_for_cursor(self.cursor) {
+            let idx_in_cache = self.layout_cache.iter().position(|vl| {
+                vl.para_idx == cur_vl.para_idx && vl.char_start == cur_vl.char_start
+            });
+            if let Some(idx) = idx_in_cache {
+                if idx > 0 {
+                    let prev = &self.layout_cache[idx - 1];
+                    let col = self.cursor.char_offset.saturating_sub(cur_vl.char_start);
+                    let new_offset = (prev.char_start + col).min(prev.char_end);
+                    self.cursor = DocCursor { para_idx: prev.para_idx, char_offset: new_offset };
+                }
+            }
+        } else if self.cursor.para_idx > 0 {
+            self.cursor.para_idx -= 1;
+            self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
+        }
+        cx.notify();
+    }
+
+    pub fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        if let Some(cur_vl) = self.visual_line_for_cursor(self.cursor) {
+            let idx_in_cache = self.layout_cache.iter().position(|vl| {
+                vl.para_idx == cur_vl.para_idx && vl.char_start == cur_vl.char_start
+            });
+            if let Some(idx) = idx_in_cache {
+                if idx + 1 < self.layout_cache.len() {
+                    let next = &self.layout_cache[idx + 1];
+                    let col = self.cursor.char_offset.saturating_sub(cur_vl.char_start);
+                    let new_offset = (next.char_start + col).min(next.char_end);
+                    self.cursor = DocCursor { para_idx: next.para_idx, char_offset: new_offset };
+                }
+            }
+        } else if self.cursor.para_idx + 1 < self.num_paras() {
+            self.cursor.para_idx += 1;
+            self.cursor.char_offset = 0;
+        }
+        cx.notify();
+    }
+
+    pub fn move_to_line_start(&mut self, _: &MoveToLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        if let Some(vl) = self.visual_line_for_cursor(self.cursor) {
+            self.cursor.char_offset = vl.char_start;
+        } else {
+            self.cursor.char_offset = 0;
+        }
+        cx.notify();
+    }
+
+    pub fn move_to_line_end(&mut self, _: &MoveToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        if let Some(vl) = self.visual_line_for_cursor(self.cursor).cloned() {
+            self.cursor.char_offset = vl.char_end;
+        } else {
+            self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
+        }
+        cx.notify();
+    }
+
+    pub fn move_to_doc_start(&mut self, _: &MoveToDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        self.cursor = DocCursor::zero();
+        cx.notify();
+    }
+
+    pub fn move_to_doc_end(&mut self, _: &MoveToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        let last = self.num_paras() - 1;
+        self.cursor = DocCursor { para_idx: last, char_offset: self.para_char_count(last) };
+        cx.notify();
+    }
+
+    // ── Select variants ───────────────────────────────────────────────────────
+
+    fn start_sel_if_needed(&mut self) {
+        if self.selection.is_none() {
+            self.selection = Some(DocSelection { anchor: self.cursor, focus: self.cursor });
+        }
+    }
+
+    fn extend_sel(&mut self) {
+        if let Some(ref mut sel) = self.selection {
+            sel.focus = self.cursor;
+        }
+    }
+
+    pub fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_sel_if_needed();
+        if self.cursor.char_offset > 0 {
+            self.cursor.char_offset -= 1;
+        } else if self.cursor.para_idx > 0 {
+            self.cursor.para_idx -= 1;
+            self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
+        }
+        self.extend_sel();
+        cx.notify();
+    }
+
+    pub fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_sel_if_needed();
+        let len = self.para_char_count(self.cursor.para_idx);
+        if self.cursor.char_offset < len {
+            self.cursor.char_offset += 1;
+        } else if self.cursor.para_idx + 1 < self.num_paras() {
+            self.cursor.para_idx += 1;
+            self.cursor.char_offset = 0;
+        }
+        self.extend_sel();
+        cx.notify();
+    }
+
+    pub fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_sel_if_needed();
+        if let Some(cur_vl) = self.visual_line_for_cursor(self.cursor) {
+            let idx_in_cache = self.layout_cache.iter().position(|vl| {
+                vl.para_idx == cur_vl.para_idx && vl.char_start == cur_vl.char_start
+            });
+            if let Some(idx) = idx_in_cache {
+                if idx > 0 {
+                    let prev = &self.layout_cache[idx - 1];
+                    let col = self.cursor.char_offset.saturating_sub(cur_vl.char_start);
+                    let new_offset = (prev.char_start + col).min(prev.char_end);
+                    self.cursor = DocCursor { para_idx: prev.para_idx, char_offset: new_offset };
+                }
+            }
+        }
+        self.extend_sel();
+        cx.notify();
+    }
+
+    pub fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_sel_if_needed();
+        if let Some(cur_vl) = self.visual_line_for_cursor(self.cursor) {
+            let idx_in_cache = self.layout_cache.iter().position(|vl| {
+                vl.para_idx == cur_vl.para_idx && vl.char_start == cur_vl.char_start
+            });
+            if let Some(idx) = idx_in_cache {
+                if idx + 1 < self.layout_cache.len() {
+                    let next = &self.layout_cache[idx + 1];
+                    let col = self.cursor.char_offset.saturating_sub(cur_vl.char_start);
+                    let new_offset = (next.char_start + col).min(next.char_end);
+                    self.cursor = DocCursor { para_idx: next.para_idx, char_offset: new_offset };
+                }
+            }
+        }
+        self.extend_sel();
+        cx.notify();
+    }
+
+    pub fn select_to_line_start(&mut self, _: &SelectToLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_sel_if_needed();
+        if let Some(vl) = self.visual_line_for_cursor(self.cursor) {
+            self.cursor.char_offset = vl.char_start;
+        } else {
+            self.cursor.char_offset = 0;
+        }
+        self.extend_sel();
+        cx.notify();
+    }
+
+    pub fn select_to_line_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_sel_if_needed();
+        if let Some(vl) = self.visual_line_for_cursor(self.cursor).cloned() {
+            self.cursor.char_offset = vl.char_end;
+        } else {
+            self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
+        }
+        self.extend_sel();
+        cx.notify();
+    }
+
+    pub fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        let last = self.num_paras() - 1;
+        let end = DocCursor { para_idx: last, char_offset: self.para_char_count(last) };
+        self.selection = Some(DocSelection { anchor: DocCursor::zero(), focus: end });
+        self.cursor = end;
+        cx.notify();
+    }
+
+    // ── Text mutation ─────────────────────────────────────────────────────────
+
+    pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // ── Table cell editing ─────────────────────────────────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                if text == "\n" {
+                    // Enter: add a new row after the current row
+                    let (_, row_count) = match &self.paragraphs[para_idx].kind {
+                        ParagraphKind::Table { headers, rows, .. } => (headers.len(), rows.len()),
+                        _ => unreachable!(),
+                    };
+                    self.table_add_row_at(para_idx, tr.min(row_count));
+                    self.table_cursor = Some((tr + 1, 0));
+                    self.cursor.char_offset = 0;
+                } else {
+                    let offset = self.cursor.char_offset;
+                    if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                        let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                        let char_count = cell.chars().count();
+                        let safe_off = offset.min(char_count);
+                        let byte_off = cell.char_indices().nth(safe_off).map(|(i, _)| i).unwrap_or(cell.len());
+                        cell.insert_str(byte_off, text);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                        self.cursor.char_offset = safe_off + text.chars().count();
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+        // ────────────────────────────────────────────────────────────────────────
+        if let Some(_) = self.selection {
+            let at = self.delete_selection(cx);
+            self.cursor = at;
+        }
+
+        if text == "\n" {
+            // Enter: split paragraph at cursor
+            let cur_para_idx = self.cursor.para_idx;
+            let split_at = self.cursor.char_offset;
+            let (head, tail) =
+                Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
+            self.paragraphs[cur_para_idx].spans = head;
+            let new_para = DocParagraph {
+                kind: ParagraphKind::Paragraph,
+                spans: tail,
+            };
+            self.paragraphs.insert(cur_para_idx + 1, new_para);
+            self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+        } else {
+            self.cursor = self.do_insert(self.cursor, text);
+        }
+        cx.notify();
+    }
+
+    pub fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        // ── Table cell backspace ───────────────────────────────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                if self.cursor.char_offset > 0 {
+                    let offset = self.cursor.char_offset;
+                    if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                        let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                        let del_at = offset - 1;
+                        let byte_range = {
+                            let mut iter = cell.char_indices();
+                            let start = iter.nth(del_at).map(|(i, _)| i).unwrap_or(cell.len());
+                            let end = iter.next().map(|(i, _)| i).unwrap_or(cell.len());
+                            start..end
+                        };
+                        cell.drain(byte_range);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                        self.cursor.char_offset = del_at;
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+        // ────────────────────────────────────────────────────────────────────────
+        if self.selection.is_some() {
+            let at = self.delete_selection(cx);
+            self.cursor = at;
+            cx.notify();
+            return;
+        }
+
+        if self.cursor.char_offset > 0 {
+            let at = DocCursor { para_idx: self.cursor.para_idx, char_offset: self.cursor.char_offset - 1 };
+            self.do_delete_chars(at, 1);
+            self.cursor = at;
+        } else if self.cursor.para_idx > 0 {
+            // Merge with previous paragraph
+            let prev_idx = self.cursor.para_idx - 1;
+            let prev_len = self.para_char_count(prev_idx);
+            let mut merged = self.paragraphs[prev_idx].spans.clone();
+            merged.extend(self.paragraphs[self.cursor.para_idx].spans.clone());
+            Self::merge_adjacent_spans(&mut merged);
+            self.paragraphs[prev_idx].spans = merged;
+            self.paragraphs.remove(self.cursor.para_idx);
+            self.cursor = DocCursor { para_idx: prev_idx, char_offset: prev_len };
+        }
+        cx.notify();
+    }
+
+    pub fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.is_some() {
+            let at = self.delete_selection(cx);
+            self.cursor = at;
+            cx.notify();
+            return;
+        }
+
+        let len = self.para_char_count(self.cursor.para_idx);
+        if self.cursor.char_offset < len {
+            self.do_delete_chars(self.cursor, 1);
+        } else if self.cursor.para_idx + 1 < self.num_paras() {
+            // Merge with next paragraph
+            let mut merged = self.paragraphs[self.cursor.para_idx].spans.clone();
+            merged.extend(self.paragraphs[self.cursor.para_idx + 1].spans.clone());
+            Self::merge_adjacent_spans(&mut merged);
+            self.paragraphs[self.cursor.para_idx].spans = merged;
+            self.paragraphs.remove(self.cursor.para_idx + 1);
+        }
+        cx.notify();
+    }
+
+    pub fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        self.insert_text("\n", cx);
+    }
+
+    pub fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        // ── Table: navigate between cells ─────────────────────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            let (col_count, row_count) = match &self.paragraphs[para_idx].kind {
+                ParagraphKind::Table { headers, rows, .. } => (headers.len(), rows.len()),
+                _ => { self.insert_text("    ", cx); return; }
+            };
+            let next_tc = tc + 1;
+            if next_tc < col_count {
+                // Move to next cell in the same row
+                let cell_len = self.table_cell_text(para_idx, tr, next_tc).chars().count();
+                self.table_cursor = Some((tr, next_tc));
+                self.cursor.char_offset = cell_len;
+            } else {
+                let next_tr = tr + 1;
+                if next_tr <= row_count {
+                    // First cell of the next row
+                    let cell_len = self.table_cell_text(para_idx, next_tr, 0).chars().count();
+                    self.table_cursor = Some((next_tr, 0));
+                    self.cursor.char_offset = cell_len;
+                } else {
+                    // Past the last row: add a new one
+                    self.table_add_row_at(para_idx, row_count);
+                    self.table_cursor = Some((row_count + 1, 0));
+                    self.cursor.char_offset = 0;
+                }
+            }
+            cx.notify();
+            return;
+        }
+        // ────────────────────────────────────────────────────────────────────────
+        self.insert_text("    ", cx);
+    }
+
+    pub fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self.selected_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    pub fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self.selected_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            let at = self.delete_selection(cx);
+            self.cursor = at;
+            cx.notify();
+        }
+    }
+
+    pub fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                if self.selection.is_some() {
+                    let at = self.delete_selection(cx);
+                    self.cursor = at;
+                }
+                // Insert line by line
+                let lines: Vec<&str> = text.split('\n').collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if i > 0 { self.insert_text("\n", cx); }
+                    if !line.is_empty() { self.insert_text(line, cx); }
+                }
+            }
+        }
+    }
+
+    // ── Formatting ────────────────────────────────────────────────────────────
+
+    /// Toggle bold on the current selection.
+    pub fn toggle_bold(&mut self, cx: &mut Context<Self>) {
+        self.toggle_format(InlineFormat::Bold, cx);
+    }
+
+    pub fn toggle_italic(&mut self, cx: &mut Context<Self>) {
+        self.toggle_format(InlineFormat::Italic, cx);
+    }
+
+    pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
+        self.toggle_format(InlineFormat::Underline, cx);
+    }
+
+    pub fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
+        self.toggle_format(InlineFormat::Strikethrough, cx);
+    }
+
+    pub fn toggle_code(&mut self, cx: &mut Context<Self>) {
+        self.toggle_format(InlineFormat::Code, cx);
+    }
+
+    fn toggle_format(&mut self, fmt: InlineFormat, cx: &mut Context<Self>) {
+        let Some(sel) = self.selection else {
+            // No text selected — do nothing.
+            return;
+        };
+
+        let (start, end) = sel.ordered();
+        if start.para_idx != end.para_idx {
+            cx.notify();
+            return; // Cross-paragraph formatting out of scope for MVP
+        }
+
+        let para = &mut self.paragraphs[start.para_idx];
+        let flat = para.plain_text();
+
+        // Determine whether to apply or clear formatting uniformly across the
+        // selected range.
+        let mut has_non_fmt = false;
+        let mut probe_char_pos = 0usize;
+        for span in &para.spans {
+            let span_chars = span.text.chars().count();
+            let span_start = probe_char_pos;
+            let span_end = span_start + span_chars;
+            probe_char_pos = span_end;
+
+            let overlap_start = span_start.max(start.char_offset);
+            let overlap_end = span_end.min(end.char_offset);
+            if overlap_start < overlap_end && span.format != fmt {
+                has_non_fmt = true;
+                break;
+            }
+        }
+
+        // Rebuild spans: split at start/end boundaries and apply one target
+        // format across the full selected range.
+        let mut new_spans: Vec<InlineSpan> = Vec::new();
+        let mut char_pos = 0usize;
+
+        for span in para.spans.clone() {
+            let span_chars = span.text.chars().count();
+            let span_start = char_pos;
+            let span_end = span_start + span_chars;
+
+            let sel_start = start.char_offset;
+            let sel_end = end.char_offset;
+
+            // Part before the selection
+            if span_start < sel_start && span_end > 0 {
+                let end_clip = sel_start.min(span_end);
+                if end_clip > span_start {
+                    let text: String = flat.chars().skip(span_start).take(end_clip - span_start).collect();
+                    if !text.is_empty() {
+                        new_spans.push(InlineSpan { text, format: span.format });
+                    }
+                }
+            }
+
+            // Part within the selection
+            let overlap_start = span_start.max(sel_start);
+            let overlap_end = span_end.min(sel_end);
+            if overlap_start < overlap_end {
+                let text: String = flat.chars().skip(overlap_start).take(overlap_end - overlap_start).collect();
+                if !text.is_empty() {
+                    let new_fmt = if has_non_fmt { fmt } else { InlineFormat::Plain };
+                    new_spans.push(InlineSpan { text, format: new_fmt });
+                }
+            }
+
+            // Part after the selection
+            if span_end > sel_end && span_start < span_end {
+                let start_clip = sel_end.max(span_start);
+                if start_clip < span_end {
+                    let text: String = flat.chars().skip(start_clip).take(span_end - start_clip).collect();
+                    if !text.is_empty() {
+                        new_spans.push(InlineSpan { text, format: span.format });
+                    }
+                }
+            }
+
+            char_pos = span_end;
+        }
+
+        para.spans = coalesce_spans(new_spans);
+        self.cursor = end;
+        self.selection = None;
+        cx.notify();
+    }
+
+    /// Change the block type of the current paragraph.
+    pub fn set_paragraph_kind(&mut self, kind: ParagraphKind, cx: &mut Context<Self>) {
+        self.paragraphs[self.cursor.para_idx].kind = kind;
+        cx.notify();
+    }
+
+    /// Insert a blank 3-column / 2-row GFM table after the current paragraph.
+    pub fn insert_table(&mut self, cx: &mut Context<Self>) {
+        let source = "| Column 1 | Column 2 | Column 3 |\n| --- | --- | --- |\n| Cell | Cell | Cell |\n| Cell | Cell | Cell |\n".to_string();
+        let headers = vec!["Column 1".to_string(), "Column 2".to_string(), "Column 3".to_string()];
+        let rows = vec![
+            vec!["Cell".to_string(), "Cell".to_string(), "Cell".to_string()],
+            vec!["Cell".to_string(), "Cell".to_string(), "Cell".to_string()],
+        ];
+        let para = DocParagraph {
+            kind: ParagraphKind::Table { source, headers, rows },
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+        };
+        let insert_at = self.cursor.para_idx + 1;
+        self.paragraphs.insert(insert_at, para);
+        self.cursor = DocCursor { para_idx: insert_at, char_offset: 0 };
+        cx.notify();
+    }
+
+    // ── Table cell helpers ─────────────────────────────────────────────────────
+
+    /// Return a copy of the text in table cell (row, col).
+    /// row=0 is the header row; row≥1 is data row (row-1).
+    fn table_cell_text(&self, para_idx: usize, row: usize, col: usize) -> String {
+        match &self.paragraphs[para_idx].kind {
+            ParagraphKind::Table { headers, rows, .. } => {
+                if row == 0 {
+                    headers.get(col).cloned().unwrap_or_default()
+                } else {
+                    rows.get(row - 1).and_then(|r| r.get(col)).cloned().unwrap_or_default()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Insert an empty data row at `data_idx` (0-indexed within rows).
+    fn table_add_row_at(&mut self, para_idx: usize, data_idx: usize) {
+        if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+            let col_count = headers.len();
+            rows.insert(data_idx.min(rows.len()), vec![String::new(); col_count]);
+            *source = gfm_rebuild_from_strings(headers, rows);
+        }
+    }
+
+    /// Add a data row after the active row (or at the bottom if no cell is active).
+    pub fn add_table_row(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        if !matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+            return;
+        }
+        let row_count = match &self.paragraphs[para_idx].kind {
+            ParagraphKind::Table { rows, .. } => rows.len(),
+            _ => return,
+        };
+        let insert_at = match self.table_cursor {
+            Some((tr, _)) => tr.min(row_count),
+            None => row_count,
+        };
+        self.table_add_row_at(para_idx, insert_at);
+        self.table_cursor = Some((insert_at + 1, 0));
+        self.cursor.char_offset = 0;
+        cx.notify();
+    }
+
+    /// Remove the currently active data row. No-op if the header is active.
+    pub fn remove_table_row(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        if let Some((tr, _)) = self.table_cursor {
+            if tr == 0 { return; }
+            if let ParagraphKind::Table { rows, headers, source } = &mut self.paragraphs[para_idx].kind {
+                let data_idx = tr - 1;
+                if data_idx < rows.len() {
+                    rows.remove(data_idx);
+                    *source = gfm_rebuild_from_strings(headers, rows);
+                    let new_tr = if rows.is_empty() { 0 } else { (data_idx + 1).min(rows.len()) };
+                    self.table_cursor = Some((new_tr, 0));
+                    self.cursor.char_offset = 0;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Add a column to the right of the active column (or at the end).
+    pub fn add_table_column(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+            let insert_at = match self.table_cursor {
+                Some((_, tc)) => (tc + 1).min(headers.len()),
+                None => headers.len(),
+            };
+            headers.insert(insert_at, format!("Column {}", headers.len() + 1));
+            for row in rows.iter_mut() {
+                row.insert(insert_at.min(row.len()), String::new());
+            }
+            *source = gfm_rebuild_from_strings(headers, rows);
+        }
+        cx.notify();
+    }
+
+    /// Map a click position to the (row, col) of the table cell under the cursor,
+    /// or None if the click is not inside any table bounds.
+    pub fn table_cell_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<(usize, usize)> {
+        let left = bounds.left() + px(LEFT_MARGIN);
+        let vl = self.layout_cache.iter().rev().find(|vl|
+            bounds.top() + px(vl.top_px) <= point.y
+        )?;
+        let para_idx = vl.para_idx;
+        if let ParagraphKind::Table { headers, rows, .. } = &self.paragraphs[para_idx].kind {
+            let col_count = headers.len().max(1);
+            let table_top = bounds.top() + px(vl.top_px);
+            let table_bottom = table_top + px(vl.height_px);
+            if point.y < table_top || point.y > table_bottom { return None; }
+            let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+            let col_w_f32: f32 = table_w / px(col_count as f32);
+            let rel_x: Pixels = (point.x - left).max(px(0.0));
+            let col = ((rel_x / px(col_w_f32)) as usize).min(col_count - 1);
+            let rel_y: Pixels = point.y - table_top;
+            let row = ((rel_y / px(TABLE_ROW_H)) as usize).min(rows.len());
+            Some((row, col))
+        } else {
+            None
+        }
+    }
+
+    // ── Mouse ─────────────────────────────────────────────────────────────────
+
+    /// Map a screen-space click position to the nearest document cursor position.
+    /// Uses the per-line `glyph_xs` cache populated each paint pass for accurate
+    /// sub-character hit testing without needing live `ShapedLine` objects.
+    pub fn cursor_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> DocCursor {
+        let relative_x = (point.x - (bounds.left() + px(LEFT_MARGIN))).max(px(0.0));
+
+        // Find the last visual line whose top edge is at or above the click y.
+        let vl = self.layout_cache.iter().rev().find(|vl|
+            bounds.top() + px(vl.top_px) <= point.y
+        );
+
+        if let Some(vl) = vl {
+            if vl.is_mermaid {
+                return DocCursor { para_idx: vl.para_idx, char_offset: 0 };
+            }
+            let char_col = find_closest_char_col(relative_x, &vl.glyph_xs);
+            return DocCursor { para_idx: vl.para_idx, char_offset: vl.char_start + char_col };
+        }
+
+        // Click above all content — go to start of document.
+        DocCursor::zero()
+    }
+
+    // ── IME helpers ───────────────────────────────────────────────────────────
+
+    /// Flat document content for IME (within the current paragraph).
+    fn current_para_content(&self) -> String {
+        self.paragraphs[self.cursor.para_idx].plain_text()
+    }
+
+    fn char_offset_to_utf16_in_para(&self, char_off: usize) -> usize {
+        self.char_offset_to_utf16_for_para(self.cursor.para_idx, char_off)
+    }
+
+    fn char_offset_to_utf16_for_para(&self, para_idx: usize, char_off: usize) -> usize {
+        let text = self.paragraphs[para_idx].plain_text();
+        let mut u16 = 0usize;
+        let mut chars_seen = 0usize;
+        for ch in text.chars() {
+            if chars_seen >= char_off { break; }
+            u16 += ch.len_utf16();
+            chars_seen += 1;
+        }
+        u16
+    }
+
+    fn utf16_to_char_offset_in_para(&self, utf16_off: usize) -> usize {
+        let text = self.current_para_content();
+        let mut char_count = 0usize;
+        let mut u16_count = 0usize;
+        for ch in text.chars() {
+            if u16_count >= utf16_off { break; }
+            u16_count += ch.len_utf16();
+            char_count += 1;
+        }
+        char_count
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Focusable + EntityInputHandler
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl Focusable for DocumentEditorState {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EntityInputHandler for DocumentEditorState {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        // When inside a table cell, report the cell text instead of paragraph text.
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let cell_text = self.table_cell_text(para_idx, tr, tc);
+                let start = utf16_to_char_offset_in_str(&cell_text, range_utf16.start);
+                let end = utf16_to_char_offset_in_str(&cell_text, range_utf16.end);
+                let ac_start = char_offset_to_utf16_in_str(&cell_text, start);
+                let ac_end = char_offset_to_utf16_in_str(&cell_text, end);
+                *actual_range = Some(ac_start..ac_end);
+                let result: String = cell_text.chars().skip(start).take(end.saturating_sub(start)).collect();
+                return Some(result);
+            }
+        }
+        let start = self.utf16_to_char_offset_in_para(range_utf16.start);
+        let end = self.utf16_to_char_offset_in_para(range_utf16.end);
+        let actual_start = self.char_offset_to_utf16_in_para(start);
+        let actual_end = self.char_offset_to_utf16_in_para(end);
+        *actual_range = Some(actual_start..actual_end);
+
+        let text = self.current_para_content();
+        let result: String = text.chars().skip(start).take(end.saturating_sub(start)).collect();
+        Some(result)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // When inside a table cell, report cursor position within cell text.
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let cell_text = self.table_cell_text(para_idx, tr, tc);
+                let off = self.cursor.char_offset.min(cell_text.chars().count());
+                let u16_off = char_offset_to_utf16_in_str(&cell_text, off);
+                return Some(UTF16Selection { range: u16_off..u16_off, reversed: false });
+            }
+        }
+        let cursor_u16 = self.char_offset_to_utf16_in_para(self.cursor.char_offset);
+        if let Some(sel) = &self.selection {
+            let (start, end) = sel.ordered();
+            // Only report if selection is within the current paragraph
+            if start.para_idx == self.cursor.para_idx && end.para_idx == self.cursor.para_idx {
+                let s_u16 = self.char_offset_to_utf16_in_para(start.char_offset);
+                let e_u16 = self.char_offset_to_utf16_in_para(end.char_offset);
+                return Some(UTF16Selection {
+                    range: s_u16..e_u16,
+                    reversed: sel.anchor > sel.focus,
+                });
+            }
+        }
+        Some(UTF16Selection { range: cursor_u16..cursor_u16, reversed: false })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let mr = self.marked_range.as_ref()?;
+        let start = bytes_to_chars(&self.current_para_content(), mr.start);
+        let end = bytes_to_chars(&self.current_para_content(), mr.end);
+        let s_u16 = self.char_offset_to_utf16_in_para(start);
+        let e_u16 = self.char_offset_to_utf16_in_para(end);
+        Some(s_u16..e_u16)
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // ── Table cell: route input into the active cell ──────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                if !new_text.is_empty() {
+                    let offset = self.cursor.char_offset;
+                    if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                        let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                        let char_count = cell.chars().count();
+                        let safe_off = offset.min(char_count);
+                        // If range_utf16 specifies a delete range (e.g. IME replacement), apply it
+                        let (del_start_char, del_end_char) = if let Some(ref r) = range_utf16 {
+                            let s = utf16_to_char_offset_in_str(cell, r.start);
+                            let e = utf16_to_char_offset_in_str(cell, r.end);
+                            (s, e)
+                        } else {
+                            (safe_off, safe_off)
+                        };
+                        if del_start_char < del_end_char {
+                            let byte_s = cell.char_indices().nth(del_start_char).map(|(i,_)| i).unwrap_or(cell.len());
+                            let byte_e = cell.char_indices().nth(del_end_char).map(|(i,_)| i).unwrap_or(cell.len());
+                            cell.drain(byte_s..byte_e);
+                        }
+                        let insert_char_off = del_start_char.min(cell.chars().count());
+                        let byte_off = cell.char_indices().nth(insert_char_off).map(|(i,_)| i).unwrap_or(cell.len());
+                        cell.insert_str(byte_off, new_text);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                        self.cursor.char_offset = insert_char_off + new_text.chars().count();
+                    }
+                }
+                self.marked_range = None;
+                cx.notify();
+                return;
+            }
+        }
+        // ── Normal paragraph text ─────────────────────────────────────────────
+        // Resolve the range to delete
+        let range = range_utf16.map(|r| {
+            let s = self.utf16_to_char_offset_in_para(r.start);
+            let e = self.utf16_to_char_offset_in_para(r.end);
+            s..e
+        }).or_else(|| {
+            self.marked_range.as_ref().map(|mr| {
+                let s = bytes_to_chars(&self.current_para_content(), mr.start);
+                let e = bytes_to_chars(&self.current_para_content(), mr.end);
+                s..e
+            })
+        }).unwrap_or_else(|| self.cursor.char_offset..self.cursor.char_offset);
+
+        // Delete the range
+        if range.start < range.end {
+            let del_at = DocCursor { para_idx: self.cursor.para_idx, char_offset: range.start };
+            self.do_delete_chars(del_at, range.end - range.start);
+            self.cursor = del_at;
+        }
+
+        // Insert new text
+        if !new_text.is_empty() {
+            self.cursor = self.do_insert(self.cursor, new_text);
+        }
+
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // ── Table cell: IME mark/replace in active cell ───────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let offset = self.cursor.char_offset;
+                if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                    let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                    let char_count = cell.chars().count();
+                    let safe_off = offset.min(char_count);
+                    let (del_start, del_end) = if let Some(ref r) = range_utf16 {
+                        let s = utf16_to_char_offset_in_str(cell, r.start);
+                        let e = utf16_to_char_offset_in_str(cell, r.end);
+                        (s, e)
+                    } else {
+                        (safe_off, safe_off)
+                    };
+                    if del_start < del_end {
+                        let byte_s = cell.char_indices().nth(del_start).map(|(i,_)| i).unwrap_or(cell.len());
+                        let byte_e = cell.char_indices().nth(del_end).map(|(i,_)| i).unwrap_or(cell.len());
+                        cell.drain(byte_s..byte_e);
+                    }
+                    let insert_off = del_start.min(cell.chars().count());
+                    let byte_off = cell.char_indices().nth(insert_off).map(|(i,_)| i).unwrap_or(cell.len());
+                    let insert_byte_start = byte_off;
+                    if !new_text.is_empty() {
+                        cell.insert_str(byte_off, new_text);
+                        self.cursor.char_offset = insert_off + new_text.chars().count();
+                    }
+                    *source = gfm_rebuild_from_strings(headers, rows);
+                    let mark_byte_end = insert_byte_start + new_text.len();
+                    self.marked_range = Some(insert_byte_start..mark_byte_end);
+                    if let Some(r) = new_selected_range_utf16 {
+                        // best-effort: adjust cursor offset within new_text
+                        let adj = utf16_to_char_offset_in_str(new_text, r.end.saturating_sub(r.start));
+                        self.cursor.char_offset = insert_off + adj;
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+        // ── Normal paragraph text ─────────────────────────────────────────────
+        let range = range_utf16.map(|r| {
+            let s = self.utf16_to_char_offset_in_para(r.start);
+            let e = self.utf16_to_char_offset_in_para(r.end);
+            s..e
+        }).unwrap_or(self.cursor.char_offset..self.cursor.char_offset);
+
+        if range.start < range.end {
+            let del_at = DocCursor { para_idx: self.cursor.para_idx, char_offset: range.start };
+            self.do_delete_chars(del_at, range.end - range.start);
+            self.cursor = del_at;
+        }
+
+        let insert_at = self.cursor;
+        let text = self.current_para_content();
+        let insert_byte_start: usize = text
+            .char_indices()
+            .nth(insert_at.char_offset)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+
+        if !new_text.is_empty() {
+            self.cursor = self.do_insert(self.cursor, new_text);
+        }
+
+        // Mark the newly inserted range
+        let mark_byte_end = insert_byte_start + new_text.len();
+        self.marked_range = Some(insert_byte_start..mark_byte_end);
+
+        if let Some(new_sel_utf16) = new_selected_range_utf16 {
+            let s = self.utf16_to_char_offset_in_para(new_sel_utf16.start);
+            let e = self.utf16_to_char_offset_in_para(new_sel_utf16.end);
+            let anchor = DocCursor { para_idx: self.cursor.para_idx, char_offset: insert_at.char_offset + s };
+            let focus = DocCursor { para_idx: self.cursor.para_idx, char_offset: insert_at.char_offset + e };
+            self.selection = Some(DocSelection { anchor, focus });
+            self.cursor = focus;
+        }
+
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let bounds = self.last_bounds?;
+        let cursor = self.cursor_from_point(point, bounds);
+        Some(self.char_offset_to_utf16_for_para(cursor.para_idx, cursor.char_offset))
+    }
+}
+
+impl Render for DocumentEditorState {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        DocumentEditorElement { state: cx.entity() }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Layout constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LEFT_MARGIN: f32 = 48.0;
+const TOP_PADDING: f32 = 24.0;
+const PARA_GAP: f32 = 8.0;
+const MERMAID_HEIGHT: f32 = 180.0;
+const TABLE_ROW_H: f32 = 28.0;
+const TABLE_CELL_PAD_X: f32 = 8.0;
+const TABLE_CELL_PAD_Y: f32 = 5.0;
+
+/// Regenerate GFM markdown source from plain-string headers + rows.
+fn gfm_rebuild_from_strings(headers: &[String], rows: &[Vec<String>]) -> String {
+    let mut out = String::new();
+    out.push('|');
+    for h in headers { out.push(' '); out.push_str(h); out.push_str(" |"); }
+    out.push('\n');
+    out.push('|');
+    for _ in headers { out.push_str(" --- |"); }
+    out.push('\n');
+    for row in rows {
+        out.push('|');
+        for ci in 0..headers.len() {
+            let cell = row.get(ci).map(|s| s.as_str()).unwrap_or("");
+            out.push(' '); out.push_str(cell); out.push_str(" |");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Total pixel height for a table paragraph (header row + data rows + border).
+fn table_height(headers: &[String], rows: &[Vec<String>]) -> f32 {
+    let _ = headers;
+    TABLE_ROW_H * (1 + rows.len()) as f32 + 2.0
+}
+
+fn para_font_size(kind: &ParagraphKind) -> f32 {
+    match kind {
+        ParagraphKind::Heading(1) => 26.0,
+        ParagraphKind::Heading(2) => 21.0,
+        ParagraphKind::Heading(3) => 18.0,
+        ParagraphKind::CodeFence(_) => 13.0,
+        ParagraphKind::Table { .. } => 13.0,
+        _ => 15.0,
+    }
+}
+
+fn para_line_height(kind: &ParagraphKind) -> f32 {
+    match kind {
+        ParagraphKind::Heading(1) => 38.0,
+        ParagraphKind::Heading(2) => 32.0,
+        ParagraphKind::Heading(3) => 28.0,
+        ParagraphKind::CodeFence(_) => 20.0,
+        ParagraphKind::Table { .. } => TABLE_ROW_H,
+        _ => 24.0,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Byte / char helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn chars_to_bytes(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
+}
+
+fn coalesce_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
+    let mut merged: Vec<InlineSpan> = Vec::new();
+    for span in spans {
+        if span.text.is_empty() {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if last.format == span.format {
+                last.text.push_str(&span.text);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+
+    if merged.is_empty() {
+        vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }]
+    } else {
+        merged
+    }
+}
+
+fn bytes_to_chars(text: &str, byte_offset: usize) -> usize {
+    let safe_offset = byte_offset.min(text.len());
+    text[..safe_offset].chars().count()
+}
+
+/// Convert a UTF-16 code-unit offset to a Unicode char offset within `text`.
+fn utf16_to_char_offset_in_str(text: &str, utf16_off: usize) -> usize {
+    let mut u16_count = 0usize;
+    for (char_idx, ch) in text.chars().enumerate() {
+        if u16_count >= utf16_off { return char_idx; }
+        u16_count += ch.len_utf16();
+    }
+    text.chars().count()
+}
+
+/// Convert a Unicode char offset to a UTF-16 code-unit offset within `text`.
+fn char_offset_to_utf16_in_str(text: &str, char_off: usize) -> usize {
+    let mut u16_count = 0usize;
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= char_off { break; }
+        u16_count += ch.len_utf16();
+    }
+    u16_count
+}
+
+/// Given a click x-position (relative to the left margin) and the precomputed
+/// glyph x-positions for a visual line, return the character column (0-based)
+/// where a cursor should be placed.
+///
+/// `xs[i]` is the left-edge x of char `i`; `xs[char_count]` is the right edge
+/// of the last char.  Returns a column clamped to `[0, char_count]`.
+fn find_closest_char_col(x: Pixels, xs: &[Pixels]) -> usize {
+    if xs.is_empty() { return 0; }
+    // Find the first entry whose left-edge is strictly to the right of x.
+    match xs.iter().position(|&ex| ex > x) {
+        // x is past all glyph edges → cursor after last char.
+        None => xs.len().saturating_sub(1),
+        // x is before the first glyph → cursor before first char.
+        Some(0) => 0,
+        // x falls between xs[i-1] and xs[i]; snap to the closer side.
+        Some(i) => {
+            if x - xs[i - 1] <= xs[i] - x { i - 1 } else { i }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TextRun builder
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn span_font(format: InlineFormat, base_font: &Font, mono_font_family: &SharedString) -> Font {
+    match format {
+        InlineFormat::Plain => base_font.clone(),
+        InlineFormat::Bold => Font {
+            weight: FontWeight::BOLD,
+            ..base_font.clone()
+        },
+        InlineFormat::Italic => Font {
+            style: FontStyle::Italic,
+            ..base_font.clone()
+        },
+        InlineFormat::Underline | InlineFormat::Strikethrough => base_font.clone(),
+        InlineFormat::Code => Font {
+            family: mono_font_family.clone(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            ..base_font.clone()
+        },
+    }
+}
+
+/// Build (line_text, text_runs) for the slice [char_start, char_end) within `spans`.
+fn spans_to_text_runs(
+    spans: &[InlineSpan],
+    char_start: usize,
+    char_end: usize,
+    base_font: &Font,
+    base_color: Hsla,
+    emphasis_color: Hsla,
+    code_color: Hsla,
+    mono_font_family: &SharedString,
+) -> (String, Vec<TextRun>) {
+    let mut line_text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut pos = 0usize;
+
+    for span in spans {
+        let span_char_len = span.text.chars().count();
+        let span_start = pos;
+        let span_end = span_start + span_char_len;
+
+        pos = span_end;
+
+        if span_end <= char_start || span_start >= char_end {
+            // No overlap
+            continue;
+        }
+
+        let overlap_start = span_start.max(char_start);
+        let overlap_end = span_end.min(char_end);
+
+        let rel_start = overlap_start - span_start;
+        let run_text: String = span.text
+            .chars()
+            .skip(rel_start)
+            .take(overlap_end - overlap_start)
+            .collect();
+
+        if run_text.is_empty() { continue; }
+
+        let byte_len = run_text.len();
+        let font = span_font(span.format, base_font, mono_font_family);
+        let color = match span.format {
+            InlineFormat::Code => code_color,
+            InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
+            InlineFormat::Plain => base_color,
+        };
+
+        let underline = match span.format {
+            InlineFormat::Underline => Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(emphasis_color),
+                wavy: false,
+            }),
+            _ => None,
+        };
+
+        let strikethrough = match span.format {
+            InlineFormat::Strikethrough => Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(emphasis_color),
+            }),
+            _ => None,
+        };
+
+        runs.push(TextRun {
+            len: byte_len,
+            font,
+            color,
+            background_color: None,
+            underline,
+            strikethrough,
+        });
+        line_text.push_str(&run_text);
+    }
+
+    if runs.is_empty() {
+        // Emit a zero-width transparent run so shape_line never panics
+        runs.push(TextRun {
+            len: 0,
+            font: base_font.clone(),
+            color: base_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+    }
+
+    (line_text, runs)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DocumentEditorElement
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct DocumentEditorElement {
+    state: Entity<DocumentEditorState>,
+}
+
+struct EditorPrepaintState;
+
+impl IntoElement for DocumentEditorElement {
+    type Element = Self;
+    fn into_element(self) -> Self::Element { self }
+}
+
+impl Element for DocumentEditorElement {
+    type RequestLayoutState = ();
+    type PrepaintState = EditorPrepaintState;
+
+    fn id(&self) -> Option<ElementId> { None }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let state = self.state.read(cx);
+        let mut total_h = TOP_PADDING;
+
+        for para in &state.paragraphs {
+            let lh = para_line_height(&para.kind);
+            match &para.kind {
+                ParagraphKind::Mermaid(_) => {
+                    total_h += MERMAID_HEIGHT + PARA_GAP;
+                }
+                ParagraphKind::Table { headers, rows, .. } => {
+                    total_h += table_height(headers, rows) + PARA_GAP;
+                }
+                _ => {
+                    // Count visual lines by counting '\n's in plain text
+                    let text = para.plain_text();
+                    let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
+                    total_h += lh * line_count as f32 + PARA_GAP;
+                }
+            }
+        }
+        total_h += TOP_PADDING; // bottom padding
+
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = px(total_h).into();
+
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let state = self.state.read(cx);
+        let mut total_h = TOP_PADDING;
+        for para in &state.paragraphs {
+            let lh = para_line_height(&para.kind);
+            match &para.kind {
+                ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
+                ParagraphKind::Table { headers, rows, .. } => {
+                    total_h += table_height(headers, rows) + PARA_GAP;
+                }
+                _ => {
+                    let text = para.plain_text();
+                    let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
+                    total_h += lh * line_count as f32 + PARA_GAP;
+                }
+            }
+        }
+
+        let _ = total_h;
+        EditorPrepaintState
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.state.read(cx).focus_handle.clone();
+
+        // Register input handler (must happen in paint)
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.state.clone()),
+            cx,
+        );
+
+        self.state.update(cx, |s, _| { s.last_bounds = Some(bounds); });
+
+        let theme = use_theme();
+        let text_style = window.text_style();
+        // Ensure the editor uses the design-system body family (Inter), which
+        // has embedded bold faces. Relying on window default style can resolve
+        // to a family with no visible weight/style variants.
+        let mut base_font = text_style.font();
+        base_font.family = theme.tokens.font_family.clone().into();
+        base_font.weight = FontWeight::NORMAL;
+        base_font.style = FontStyle::Normal;
+        let mono_family: SharedString = theme.tokens.font_mono.clone().into();
+        let emphasis_color = theme.tokens.primary;
+        let code_color = theme.tokens.primary.opacity(0.85);
+        let selection_color = theme.tokens.primary.opacity(0.22);
+        let caret_color = theme.tokens.primary;
+
+        let (paragraphs, cursor, selection, table_cursor) = {
+            let s = self.state.read(cx);
+            (s.paragraphs.clone(), s.cursor, s.selection, s.table_cursor)
+        };
+
+        let mut current_y: f32 = TOP_PADDING;
+        let left: Pixels = bounds.left() + px(LEFT_MARGIN);
+        let mut visual_lines: Vec<VisualLine> = Vec::new();
+        let mut line_layouts: Vec<Option<ShapedLine>> = Vec::new();
+
+        for (para_idx, para) in paragraphs.iter().enumerate() {
+            let kind = &para.kind;
+            let font_size_px = para_font_size(kind);
+            let line_height = para_line_height(kind);
+            let font_size = px(font_size_px);
+            let lh_px = px(line_height);
+
+            let para_color = match kind {
+                ParagraphKind::Heading(_) => theme.tokens.foreground,
+                ParagraphKind::BlockQuote => theme.tokens.muted_foreground,
+                _ => theme.tokens.foreground,
+            };
+
+            match kind {
+                ParagraphKind::Mermaid(_) => {
+                    // Paint a placeholder rectangle for mermaid blocks
+                    let top_screen = bounds.top() + px(current_y);
+                    let mermaid_bounds = Bounds::new(
+                        point(left, top_screen),
+                        size(bounds.size.width - px(LEFT_MARGIN * 2.0), px(MERMAID_HEIGHT)),
+                    );
+                    window.paint_quad(fill(mermaid_bounds, theme.tokens.muted.opacity(0.3)));
+                    // Label
+                    let label_run = TextRun {
+                        len: "Mermaid diagram".len(),
+                        font: base_font.clone(),
+                        color: theme.tokens.muted_foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(
+                        "Mermaid diagram".into(),
+                        px(13.0),
+                        &[label_run],
+                        None,
+                    );
+                    let _ = shaped.paint(
+                        point(left, top_screen + px(MERMAID_HEIGHT / 2.0 - 8.0)),
+                        px(20.0),
+                        window,
+                        cx,
+                    );
+                    visual_lines.push(VisualLine {
+                        para_idx,
+                        char_start: 0,
+                        char_end: 0,
+                        top_px: current_y,
+                        height_px: MERMAID_HEIGHT,
+                        font_size_px,
+                        is_mermaid: true,
+                        glyph_xs: vec![],
+                    });
+                    line_layouts.push(None);
+                    current_y += MERMAID_HEIGHT + PARA_GAP;
+                    continue;
+                }
+                ParagraphKind::Table { headers, rows, .. } => {
+                    let th = table_height(headers, rows);
+                    let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+                    let col_count = headers.len().max(1);
+                    // col_w_f32: raw f32 for arithmetic (Pixels/Pixels = f32)
+                    let col_w_f32: f32 = table_w / px(col_count as f32);
+                    let top_screen = bounds.top() + px(current_y);
+
+                    // Background
+                    let table_bounds = Bounds::new(
+                        point(left, top_screen),
+                        size(table_w, px(th)),
+                    );
+                    window.paint_quad(fill(table_bounds, theme.tokens.muted.opacity(0.08)));
+
+                    // Horizontal separator after header
+                    let sep_y = top_screen + px(TABLE_ROW_H);
+                    let sep = Bounds::new(
+                        point(left, sep_y),
+                        size(table_w, px(1.0)),
+                    );
+                    window.paint_quad(fill(sep, theme.tokens.border));
+
+                    // Outer border
+                    for (bx, by, bw, bh) in [
+                        (left, top_screen, table_w, px(1.0)),                        // top
+                        (left, top_screen + px(th - 1.0), table_w, px(1.0)),          // bottom
+                        (left, top_screen, px(1.0), px(th)),                           // left
+                        (left + table_w - px(1.0), top_screen, px(1.0), px(th)),       // right
+                    ] {
+                        window.paint_quad(fill(Bounds::new(point(bx, by), size(bw, bh)), theme.tokens.border));
+                    }
+
+                    // Vertical column separators
+                    for ci in 1..headers.len() {
+                        let cx_px = left + px(col_w_f32 * ci as f32);
+                        let vert = Bounds::new(point(cx_px, top_screen), size(px(1.0), px(th)));
+                        window.paint_quad(fill(vert, theme.tokens.border));
+                    }
+
+                    // Paint cell text
+                    let cell_font_size = px(13.0);
+                    let cell_lh = px(TABLE_ROW_H);
+
+                    let mut paint_cells = |cells: &[String], row_top: Pixels, bold: bool, window: &mut Window| {
+                        let mut header_font = base_font.clone();
+                        if bold { header_font.weight = gpui::FontWeight::BOLD; }
+                        for (ci, cell_text) in cells.iter().enumerate() {
+                            let cell_x = left + px(col_w_f32 * ci as f32 + TABLE_CELL_PAD_X);
+                            let cell_y = row_top + px(TABLE_CELL_PAD_Y);
+                            // Clip text to column width
+                            let max_chars = ((col_w_f32 - TABLE_CELL_PAD_X * 2.0) / 7.5).max(4.0) as usize;
+                            let display: String = cell_text.chars().take(max_chars.max(4)).collect();
+                            if display.is_empty() { continue; }
+                            let run = TextRun {
+                                len: display.len(),
+                                font: header_font.clone(),
+                                color: if bold { theme.tokens.foreground } else { theme.tokens.foreground },
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            let shaped = window.text_system().shape_line(
+                                display.clone().into(),
+                                cell_font_size,
+                                &[run],
+                                None,
+                            );
+                            let _ = shaped.paint(point(cell_x, cell_y), cell_lh, window, cx);
+                        }
+                    };
+
+                    // Header row (bold)
+                    paint_cells(headers, top_screen, true, window);
+                    // Data rows
+                    for (ri, row) in rows.iter().enumerate() {
+                        let row_top = top_screen + px(TABLE_ROW_H * (ri + 1) as f32);
+                        // Alternate row bg
+                        if ri % 2 == 1 {
+                            let row_bg = Bounds::new(
+                                point(left + px(1.0), row_top),
+                                size(table_w - px(2.0), px(TABLE_ROW_H)),
+                            );
+                            window.paint_quad(fill(row_bg, theme.tokens.muted.opacity(0.15)));
+                        }
+                        paint_cells(row, row_top, false, window);
+                    }
+
+                    // ── Active cell highlight + text cursor ─────────────────
+                    if let Some((tc_tr, tc_tc)) = table_cursor {
+                        if cursor.para_idx == para_idx && tc_tc < col_count {
+                            let cell_x = left + px(col_w_f32 * tc_tc as f32);
+                            let cell_y = top_screen + px(TABLE_ROW_H * tc_tr as f32);
+                            let cell_w = px(col_w_f32);
+                            let cell_h = px(TABLE_ROW_H);
+                            // Highlight fill
+                            window.paint_quad(fill(
+                                Bounds::new(point(cell_x, cell_y), size(cell_w, cell_h)),
+                                theme.tokens.primary.opacity(0.12),
+                            ));
+                            // Highlight border (4 sides)
+                            for (bx, by, bw, bh) in [
+                                (cell_x, cell_y, cell_w, px(1.5)),
+                                (cell_x, cell_y + cell_h - px(1.5), cell_w, px(1.5)),
+                                (cell_x, cell_y, px(1.5), cell_h),
+                                (cell_x + cell_w - px(1.5), cell_y, px(1.5), cell_h),
+                            ] {
+                                window.paint_quad(fill(Bounds::new(point(bx, by), size(bw, bh)), theme.tokens.primary));
+                            }
+                            // Text cursor caret inside the active cell
+                            if focus_handle.is_focused(window) {
+                                let cell_text: String = if tc_tr == 0 {
+                                    headers.get(tc_tc).cloned().unwrap_or_default()
+                                } else {
+                                    rows.get(tc_tr - 1).and_then(|r| r.get(tc_tc)).cloned().unwrap_or_default()
+                                };
+                                let caret_col = cursor.char_offset.min(cell_text.chars().count());
+                                let prefix: String = cell_text.chars().take(caret_col).collect();
+                                let prefix_w = if prefix.is_empty() {
+                                    px(0.0)
+                                } else {
+                                    let prefix_bytes = prefix.len();
+                                    let run = TextRun {
+                                        len: prefix_bytes,
+                                        font: base_font.clone(),
+                                        color: theme.tokens.foreground,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    };
+                                    let shaped = window.text_system().shape_line(
+                                        prefix.into(),
+                                        cell_font_size,
+                                        &[run],
+                                        None,
+                                    );
+                                    shaped.x_for_index(prefix_bytes)
+                                };
+                                let caret_x = cell_x + px(TABLE_CELL_PAD_X) + prefix_w;
+                                let caret_y2 = cell_y + px(TABLE_CELL_PAD_Y);
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(caret_x, caret_y2),
+                                        size(px(2.0), px(TABLE_ROW_H - TABLE_CELL_PAD_Y * 2.0)),
+                                    ),
+                                    caret_color,
+                                ));
+                            }
+                        }
+                    }
+
+                    visual_lines.push(VisualLine {
+                        para_idx,
+                        char_start: 0,
+                        char_end: 0,
+                        top_px: current_y,
+                        height_px: th,
+                        font_size_px,
+                        is_mermaid: false,
+                        glyph_xs: vec![],
+                    });
+                    line_layouts.push(None);
+                    current_y += th + PARA_GAP;
+                    continue;
+                }
+                _ => {}
+            }
+
+            // For code fences, draw a background rect first
+            if let ParagraphKind::CodeFence(_) = kind {
+                let text = para.plain_text();
+                let sublines = text.split('\n').count().max(1);
+                let total_height = line_height * sublines as f32 + 8.0;
+                let code_bg = Bounds::new(
+                    point(left - px(8.0), bounds.top() + px(current_y - 4.0)),
+                    size(bounds.size.width - px((LEFT_MARGIN - 8.0) * 2.0), px(total_height)),
+                );
+                window.paint_quad(fill(code_bg, theme.tokens.muted.opacity(0.3)));
+            }
+
+            // Blockquote left bar
+            if let ParagraphKind::BlockQuote = kind {
+                let text = para.plain_text();
+                let sublines = text.split('\n').count().max(1);
+                let total_height = line_height * sublines as f32;
+                let bar = Bounds::new(
+                    point(left - px(12.0), bounds.top() + px(current_y)),
+                    size(px(3.0), px(total_height)),
+                );
+                window.paint_quad(fill(bar, theme.tokens.border));
+            }
+
+            // Split paragraph text at '\n' to get visual sub-lines
+            let flat = para.plain_text();
+            let sublines: Vec<&str> = flat.split('\n').collect();
+            let mut char_start = 0usize;
+
+            for subline in &sublines {
+                let char_count = subline.chars().count();
+                let char_end = char_start + char_count;
+                let line_y_screen = bounds.top() + px(current_y);
+
+                // Shape the line and compute per-character x-positions for
+                // accurate mouse hit-testing (stored in VisualLine::glyph_xs).
+                let glyph_xs: Vec<Pixels>;
+                let shaped_line: Option<ShapedLine>;
+
+                if subline.is_empty() {
+                    // Empty line — cursor sits at x=0 relative to margin.
+                    glyph_xs = vec![px(0.0)];
+                    shaped_line = None;
+                } else {
+                    let (line_text, runs) = spans_to_text_runs(
+                        &para.spans,
+                        char_start,
+                        char_end,
+                        &base_font,
+                        para_color,
+                        emphasis_color,
+                        code_color,
+                        &mono_family,
+                    );
+                    let total_run_bytes: usize = runs.iter().map(|r| r.len).sum();
+                    if !line_text.is_empty() && total_run_bytes > 0 {
+                        let shaped = window.text_system().shape_line(
+                            line_text.clone().into(),
+                            font_size,
+                            &runs,
+                            None,
+                        );
+                        // glyph_xs[i] = left-edge x of char i (relative to left margin).
+                        // glyph_xs[char_count] = right-edge of last char (cursor-after-end).
+                        let char_count = char_end - char_start;
+                        glyph_xs = (0..=char_count)
+                            .map(|ci| shaped.x_for_index(chars_to_bytes(subline, ci)))
+                            .collect();
+                        let _ = shaped.paint(point(left, line_y_screen), lh_px, window, cx);
+                        shaped_line = Some(shaped);
+                    } else {
+                        glyph_xs = vec![px(0.0)];
+                        shaped_line = None;
+                    }
+                }
+
+                visual_lines.push(VisualLine {
+                    para_idx,
+                    char_start,
+                    char_end,
+                    top_px: current_y,
+                    height_px: line_height,
+                    font_size_px,
+                    is_mermaid: false,
+                    glyph_xs,
+                });
+                line_layouts.push(shaped_line);
+
+                char_start = char_end + 1;
+                current_y += line_height;
+            }
+
+            current_y += PARA_GAP;
+        }
+
+        // Store layout cache in state for cursor/mouse use
+        self.state.update(cx, |s, _| {
+            s.layout_cache = visual_lines.clone();
+        });
+
+        // ── Selection highlight ──────────────────────────────────────────────
+        if let Some(sel) = selection {
+            let (sel_start, sel_end) = sel.ordered();
+            for (vl_idx, vl) in visual_lines.iter().enumerate() {
+                if vl.is_mermaid { continue; }
+                let vl_para = vl.para_idx;
+                let vl_cs = vl.char_start;
+                let vl_ce = vl.char_end;
+
+                let sel_s_in_vl = if sel_start.para_idx == vl_para {
+                    if sel_start.char_offset > vl_ce { continue; }
+                    sel_start.char_offset.max(vl_cs)
+                } else if sel_start.para_idx < vl_para {
+                    vl_cs
+                } else {
+                    continue;
+                };
+
+                let sel_e_in_vl = if sel_end.para_idx == vl_para {
+                    if sel_end.char_offset < vl_cs { continue; }
+                    sel_end.char_offset.min(vl_ce)
+                } else if sel_end.para_idx > vl_para {
+                    vl_ce
+                } else {
+                    continue;
+                };
+
+                let line_y_screen = bounds.top() + px(vl.top_px);
+                let (sel_x_start, sel_width) = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
+                    let col_s = sel_s_in_vl - vl_cs;
+                    let col_e = sel_e_in_vl - vl_cs;
+                    let vl_text: String = paragraphs[vl_para].plain_text()
+                        .chars().skip(vl_cs).take(vl_ce - vl_cs).collect();
+                    let byte_s = chars_to_bytes(&vl_text, col_s);
+                    let byte_e = chars_to_bytes(&vl_text, col_e);
+                    let x_s = shaped.x_for_index(byte_s);
+                    let x_e = shaped.x_for_index(byte_e);
+                    (left + x_s, x_e - x_s)
+                } else {
+                    (left, px(0.0))
+                };
+
+                if sel_width > px(0.0) {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(sel_x_start, line_y_screen),
+                            size(sel_width, px(vl.height_px)),
+                        ),
+                        selection_color,
+                    ));
+                }
+            }
+        }
+
+        // ── Cursor caret ─────────────────────────────────────────────────────
+        if focus_handle.is_focused(window) {
+            let cur_vl = visual_lines.iter().enumerate().find(|(_, vl)| {
+                vl.para_idx == cursor.para_idx
+                    && cursor.char_offset >= vl.char_start
+                    && cursor.char_offset <= vl.char_end
+            });
+
+            if let Some((vl_idx, vl)) = cur_vl {
+                // Tables draw their own cell caret in the table paint block above.
+                if !matches!(&paragraphs[vl.para_idx].kind, ParagraphKind::Table { .. }) {
+                let col = cursor.char_offset - vl.char_start;
+                let cursor_x = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
+                    let vl_text: String = paragraphs[vl.para_idx].plain_text()
+                        .chars().skip(vl.char_start).take(vl.char_end - vl.char_start).collect();
+                    let byte_col = chars_to_bytes(&vl_text, col);
+                    left + shaped.x_for_index(byte_col)
+                } else {
+                    left
+                };
+                let cursor_y_screen = bounds.top() + px(vl.top_px);
+
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(cursor_x, cursor_y_screen),
+                        size(px(2.0), px(vl.height_px)),
+                    ),
+                    caret_color,
+                ));
+                } // end table guard
+            }
+        }
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DocumentEditor — public RenderOnce wrapper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The public component. Renders the full document as a scrollable rich editor.
+#[derive(IntoElement)]
+pub struct DocumentEditor {
+    state: Entity<DocumentEditorState>,
+    show_border: bool,
+}
+
+impl DocumentEditor {
+    pub fn new(state: &Entity<DocumentEditorState>) -> Self {
+        Self { state: state.clone(), show_border: false }
+    }
+
+    pub fn show_border(mut self, show: bool) -> Self {
+        self.show_border = show;
+        self
+    }
+}
+
+impl RenderOnce for DocumentEditor {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = use_theme();
+        let focus_handle = self.state.read(cx).focus_handle.clone();
+
+        let state = self.state.clone();
+        let state_move = self.state.clone();
+        let state_up = self.state.clone();
+
+        let mut base = div()
+            .id(("document-editor", self.state.entity_id()))
+            .key_context("DocumentEditor")
+            .track_focus(&focus_handle)
+            .size_full()
+            .bg(theme.tokens.background)
+            .cursor_text()
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_left))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_right))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_up))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_down))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_to_line_start))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_to_line_end))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_to_doc_start))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::move_to_doc_end))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_left))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_right))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_up))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_down))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_to_line_start))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_to_line_end))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::select_all))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::backspace))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::delete))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::enter))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::tab))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::copy))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::cut))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::paste))
+            .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                let bounds = state.read(cx).last_bounds.unwrap_or_default();
+                let new_cursor = state.read(cx).cursor_from_point(event.position, bounds);
+                let new_table_cell = state.read(cx).table_cell_from_point(event.position, bounds);
+                let focus = state.read(cx).focus_handle.clone();
+                state.update(cx, |s, cx| {
+                    s.cursor = new_cursor;
+                    s.table_cursor = new_table_cell;
+                    // When clicking into a table cell, position char_offset at end of cell text
+                    if let Some((tr, tc)) = new_table_cell {
+                        let cell_len = s.table_cell_text(s.cursor.para_idx, tr, tc).chars().count();
+                        s.cursor.char_offset = cell_len;
+                    }
+                    // Do not clear selection here. A plain click will clear it on mouse up;
+                    // a drag will set drag_occurred=true and keep the selection.
+                    s.drag_anchor = Some(new_cursor);
+                    s.drag_occurred = false;
+                    cx.notify();
+                });
+                window.focus(&focus);
+            })
+            .on_mouse_move(move |event: &MouseMoveEvent, _window: &mut Window, cx: &mut App| {
+                // Guard on drag_anchor rather than event.pressed_button: pressed_button
+                // detection can be unreliable on some Linux compositors.
+                // drag_anchor is only Some when on_mouse_down already fired, so this
+                // is definitively a left-button drag gesture.
+                let (bounds, drag_anchor) = {
+                    let s = state_move.read(cx);
+                    (s.last_bounds.unwrap_or_default(), s.drag_anchor)
+                };
+                if let Some(anchor) = drag_anchor {
+                    let focus_cursor = state_move.read(cx).cursor_from_point(event.position, bounds);
+                    state_move.update(cx, |s, cx| {
+                        s.drag_occurred = true;
+                        s.cursor = focus_cursor;
+                        s.selection = if anchor == focus_cursor {
+                            None
+                        } else {
+                            Some(DocSelection { anchor, focus: focus_cursor })
+                        };
+                        cx.notify();
+                    });
+                }
+            })
+            .on_mouse_up(MouseButton::Left, move |event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
+                let _ = event;
+                state_up.update(cx, |s, cx| {
+                    // Plain click clears selection; completed drag preserves it.
+                    if !s.drag_occurred {
+                        s.selection = None;
+                    }
+                    s.drag_anchor = None;
+                    s.drag_occurred = false;
+                    cx.notify();
+                });
+            });
+
+        if self.show_border {
+            base = base.border_1().border_color(theme.tokens.border).rounded(theme.tokens.radius_md);
+        }
+
+        base.child(DocumentEditorElement { state: self.state.clone() })
+    }
+}

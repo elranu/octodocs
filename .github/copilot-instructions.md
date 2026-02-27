@@ -35,9 +35,9 @@ Nightly Rust is required — `desktop/rust-toolchain.toml` pins the channel auto
 
 `adabraka-ui` and `adabraka-gpui` are **not** fetched from crates.io — they are overridden by `[patch.crates-io]` in `desktop/Cargo.toml` to local paths under `desktop/patches/`. **Always edit the patch source**, never the crates.io cache. Key patches:
 - `patches/adabraka-gpui/src/scene.rs` + `window.rs` — GPU shader padding (prevents Vulkan crash on startup)
-- `patches/adabraka-ui/src/components/editor.rs` — added `wrap_selection()` and `insert_text()` for toolbar
+- `patches/adabraka-ui/src/components/document_editor.rs` — continuous WYSIWYG document editor state + renderer
 - `patches/adabraka-ui/src/components/icon.rs` — icon color defaults to `foreground` (was invisible on dark themes)
-- `patches/adabraka-ui/src/components/editor.rs` — added `place_cursor_at_end()` for block activation
+- `patches/adabraka-ui/src/components/editor.rs` — source editor improvements used in Source/Split modes
 
 ## GPUI patterns
 
@@ -58,15 +58,18 @@ let _ = weak.update(cx, |state, cx| { ... });
 
 Views implement `Render` and use `use_theme()` for all colors — never hardcode values.
 
-## WYSIWYG block editor architecture
+## WYSIWYG continuous editor architecture
 
-The editor is a **single-pane** model (no split pane). State lives in `app_state.rs`:
+The editor is a **single-pane continuous document** model (Word/Docs-style). State lives in `app_state.rs`:
 
-- `blocks: Vec<DocumentBlock>` — document split into top-level blocks by `Renderer::parse_blocks()`
-- `active_block: Option<usize>` — `None` means all blocks are rendered; `Some(i)` means block `i` is in edit mode
-- `editor_state: Entity<EditorState>` — a **single shared editor** reused for whichever block is active
+- `doc_editor: Entity<DocumentEditorState>` — one entity for the full WYSIWYG document
+- `full_editor_state: Entity<EditorState>` — raw markdown editor used for Source/Split modes
 
-On activation (`activate_block(idx)`): block source is loaded into the shared editor and `place_cursor_at_end()` is called. On any editor change, the subscription in `AppState::new()` splices back the edited source, calls `DocumentBlock::reassemble()`, and sets `dirty = true`. `BlockEditorPane` (`views/block_editor_pane.rs`) renders each block: active → `Editor` widget; inactive → `render_node()` from `preview_pane.rs`.
+`DocumentEditorState` owns document paragraphs, cursor, selection, and layout cache. Toolbar actions in `root.rs` call `doc_editor.update(...)` directly (`toggle_bold`, `toggle_italic`, `toggle_underline`, `toggle_strikethrough`, `toggle_code`, heading changes).
+
+On editor changes, the subscription in `AppState::new()` serializes `doc_editor` back to markdown (`to_markdown()`), updates `document.content`, and marks `dirty = true`.
+
+The main WYSIWYG view is `DocumentEditorPane` (`views/document_editor_pane.rs`), which hosts `DocumentEditor` from `patches/adabraka-ui/src/components/document_editor.rs`.
 
 ## Mermaid rendering pipeline
 
@@ -92,8 +95,10 @@ Icons load from `desktop/crates/octodocs-app/assets/icons/`. The custom `AssetSo
 | Type | Location | Purpose |
 |---|---|---|
 | `Document` | `octodocs-core::document` | raw content + optional `PathBuf` |
-| `DocumentBlock` | `octodocs-core::renderer` | `{ source: String, node: RenderNode }` |
+| `DocParagraph` | `octodocs-core::doc_model` | continuous editor paragraph + inline spans |
+| `InlineFormat` | `octodocs-core::doc_model` | `Plain`, `Bold`, `Italic`, `Underline`, `Strikethrough`, `Code` |
 | `RenderNode` | `octodocs-core::renderer` | enum: `Heading`, `Paragraph`, `MermaidBlock`, … |
 | `AppState` | `octodocs-app::app_state` | single Entity shared by all views |
-| `BlockEditorPane` | `views/block_editor_pane.rs` | main content view (WYSIWYG) |
+| `DocumentEditorState` | `adabraka-ui::components::document_editor` | WYSIWYG state + editing operations |
+| `DocumentEditorPane` | `views/document_editor_pane.rs` | main content view (WYSIWYG) |
 | `RootView` | `views/root.rs` | top-level layout: toolbar + pane + status bar |

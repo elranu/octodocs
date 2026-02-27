@@ -99,7 +99,6 @@ pub fn help_menu() -> AppMenu {
 }
 
 pub struct StandardMacMenuBar {
-    app_name: SharedString,
     file_menu: Option<AppMenu>,
     edit_menu: Option<AppMenu>,
     view_menu: Option<AppMenu>,
@@ -108,9 +107,8 @@ pub struct StandardMacMenuBar {
 }
 
 impl StandardMacMenuBar {
-    pub fn new(app_name: impl Into<SharedString>) -> Self {
+    pub fn new(_app_name: impl Into<SharedString>) -> Self {
         Self {
-            app_name: app_name.into(),
             file_menu: None,
             edit_menu: None,
             view_menu: None,

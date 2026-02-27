@@ -4,10 +4,10 @@ use std::rc::Rc;
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
-use octodocs_core::FileIo;
+use octodocs_core::{FileIo, ParagraphKind};
 use octodocs_github::{get_stored_token, SyncStatus};
 
-use super::block_editor_pane::BlockEditorPane;
+use super::document_editor_pane::DocumentEditorPane;
 use super::editor_pane::EditorPane;
 use super::github_auth_modal::GithubAuthModal;
 use super::github_sidebar::GithubSidebar;
@@ -16,8 +16,8 @@ use super::repo_add_modal::RepoAddModal;
 use crate::app_state::{AppState, PostAuthAction};
 
 pub struct RootView {
-    app_state: Entity<AppState>,
-    block_editor_pane: Entity<BlockEditorPane>,
+    pub app_state: Entity<AppState>,
+    document_editor_pane: Entity<DocumentEditorPane>,
     editor_pane: Entity<EditorPane>,
     preview_pane: Entity<PreviewPane>,
     github_sidebar: Entity<GithubSidebar>,
@@ -31,7 +31,7 @@ pub struct RootView {
 impl RootView {
     pub fn new(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
         let app_state = cx.new(|cx| AppState::new(cx));
-        let block_editor_pane = cx.new(|_| BlockEditorPane::new(app_state.clone()));
+        let document_editor_pane = cx.new(|_| DocumentEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
         let github_sidebar = cx.new(|cx| GithubSidebar::new(app_state.clone(), cx));
@@ -49,12 +49,12 @@ impl RootView {
         });
 
         // Re-render when AppState changes (content/block/mode changes).
-        let pane_bep = block_editor_pane.clone();
+        let pane_dep = document_editor_pane.clone();
         let pane_ep = editor_pane.clone();
         let pane_pp = preview_pane.clone();
         let pane_sb = github_sidebar.clone();
         let subscription = cx.observe(&app_state, move |_, _, cx| {
-            pane_bep.update(cx, |_, cx| cx.notify());
+            pane_dep.update(cx, |_, cx| cx.notify());
             pane_ep.update(cx, |_, cx| cx.notify());
             pane_pp.update(cx, |_, cx| cx.notify());
             pane_sb.update(cx, |_, cx| cx.notify());
@@ -69,9 +69,7 @@ impl RootView {
             repo_modal_clone.update(cx, |_, cx| cx.notify());
         });
 
-        // editor_weak targets the shared block editor — toolbar actions operate
-        // on whichever block is currently active.
-        let editor_weak = app_state.read(cx).editor_state.downgrade();
+        // toolbar actions operate on the single doc_editor entity.
         let app_weak = app_state.downgrade();
 
         let aw = app_weak.clone();
@@ -104,29 +102,85 @@ impl RootView {
             let _ = aw.update(cx, |state, cx| state.save_as(cx));
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let bold_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("**", "**", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_bold(cx));
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let italic_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("*", "*", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_italic(cx));
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let code_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.wrap_selection("`", "`", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_code(cx));
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
+        let underline_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_underline(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let strike_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_strikethrough(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
         let h1_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.insert_text("# ", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| {
+                    editor.set_paragraph_kind(ParagraphKind::Heading(1), cx);
+                });
+            });
         };
 
-        let ew = editor_weak.clone();
+        let aw = app_weak.clone();
         let h2_h = move |_w: &mut Window, cx: &mut App| {
-            let _ = ew.update(cx, |state, cx| state.insert_text("## ", cx));
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| {
+                    editor.set_paragraph_kind(ParagraphKind::Heading(2), cx);
+                });
+            });
+        };
+
+        let aw = app_weak.clone();
+        let insert_table_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.insert_table(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let add_row_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.add_table_row(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let remove_row_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.remove_table_row(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let add_col_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.add_table_column(cx));
+            });
         };
 
         let is_dark = Rc::new(Cell::new(initial_is_dark));
@@ -199,6 +253,16 @@ impl RootView {
                                 .tooltip("Italic (Ctrl+I)")
                                 .on_click(italic_h),
                         )
+                        .button(
+                            ToolbarButton::new("underline", IconSource::Named("underline".into()))
+                                .tooltip("Underline")
+                                .on_click(underline_h),
+                        )
+                        .button(
+                            ToolbarButton::new("strikethrough", IconSource::Named("strikethrough".into()))
+                                .tooltip("Strikethrough")
+                                .on_click(strike_h),
+                        )
                         .separator()
                         .button(
                             ToolbarButton::new("h1", IconSource::Named("heading-1".into()))
@@ -214,6 +278,26 @@ impl RootView {
                             ToolbarButton::new("code", IconSource::Named("code".into()))
                                 .tooltip("Inline Code")
                                 .on_click(code_h),
+                        )
+                        .button(
+                            ToolbarButton::new("table", IconSource::Named("table".into()))
+                                .tooltip("Insert Table")
+                                .on_click(insert_table_h),
+                        )
+                        .button(
+                            ToolbarButton::new("row-add", IconSource::Named("row-add".into()))
+                                .tooltip("Add Row (Tab at end)")
+                                .on_click(add_row_h),
+                        )
+                        .button(
+                            ToolbarButton::new("col-add", IconSource::Named("col-add".into()))
+                                .tooltip("Add Column")
+                                .on_click(add_col_h),
+                        )
+                        .button(
+                            ToolbarButton::new("row-remove", IconSource::Named("x".into()))
+                                .tooltip("Remove Row")
+                                .on_click(remove_row_h),
                         )
                         .separator()
                         .button(
@@ -256,7 +340,7 @@ impl RootView {
 
         Self {
             app_state,
-            block_editor_pane,
+            document_editor_pane,
             editor_pane,
             preview_pane,
             github_sidebar,
@@ -281,6 +365,7 @@ impl Render for RootView {
         let repo_add_modal_open = app.repo_add_modal_open;
         let sidebar_open = app.sidebar_open;
         let show_unsaved_prompt = app.show_unsaved_prompt;
+        let pending_window_close = app.pending_window_close;
         let github_sync_status = app.github_sync_status.clone();
         let github_sync_configured = !app.github_bindings.is_empty();
         let current_doc_path = app.document.path.clone();
@@ -290,7 +375,7 @@ impl Render for RootView {
             (Some(current), Some(last)) => current == last,
             _ => false,
         };
-        drop(app);
+        let _ = app;
 
         if repo_add_modal_open {
             if let Ok(Some(token)) = get_stored_token() {
@@ -425,7 +510,7 @@ impl Render for RootView {
                 .flex()
                 .flex_grow()
                 .min_h_0()
-                .child(self.block_editor_pane.clone())
+                .child(self.document_editor_pane.clone())
                 .into_any_element(),
             crate::app_state::ViewMode::Source => div()
                 .flex()
@@ -505,6 +590,7 @@ impl Render for RootView {
             let _ = app_weak_prompt_cancel_backdrop.update(cx, |state, cx| {
                 state.pending_open_path = None;
                 state.show_unsaved_prompt = false;
+                state.pending_window_close = false;
                 cx.notify();
             });
         };
@@ -529,7 +615,11 @@ impl Render for RootView {
             .content(
                 div()
                     .p(px(16.0))
-                    .child(body("You have unsaved changes. Save before opening?")),
+                    .child(body(if pending_window_close {
+                        "You have unsaved changes. Save before closing?"
+                    } else {
+                        "You have unsaved changes. Save before opening?"
+                    })),
             )
             .footer(
                 div()
@@ -546,6 +636,7 @@ impl Render for RootView {
                                 let _ = app_weak_prompt_cancel_btn.update(cx, |state, cx| {
                                     state.pending_open_path = None;
                                     state.show_unsaved_prompt = false;
+                                    state.pending_window_close = false;
                                     cx.notify();
                                 });
                             }),
@@ -556,14 +647,19 @@ impl Render for RootView {
                             .on_click(move |_, _w, cx| {
                                 let _ = app_weak_prompt_discard_btn.update(cx, |state, cx| {
                                     state.dirty = false;
-                                    if let Some(path) = state.pending_open_path.take() {
-                                        match FileIo::open(&path) {
-                                            Ok(doc) => state.load_document(doc, cx),
-                                            Err(err) => eprintln!("Open error: {err}"),
-                                        }
-                                    }
                                     state.show_unsaved_prompt = false;
-                                    cx.notify();
+                                    if state.pending_window_close {
+                                        state.pending_window_close = false;
+                                        cx.quit();
+                                    } else {
+                                        if let Some(path) = state.pending_open_path.take() {
+                                            match FileIo::open(&path) {
+                                                Ok(doc) => state.load_document(doc, cx),
+                                                Err(err) => eprintln!("Open error: {err}"),
+                                            }
+                                        }
+                                        cx.notify();
+                                    }
                                 });
                             }),
                     )
@@ -572,17 +668,25 @@ impl Render for RootView {
                             .variant(ButtonVariant::Default)
                             .on_click(move |_, _w, cx| {
                                 let _ = app_weak_prompt_save_btn.update(cx, |state, cx| {
-                                    state.save_as(cx);
+                                    state.save(cx);
                                     if !state.dirty {
-                                        if let Some(path) = state.pending_open_path.take() {
-                                            match FileIo::open(&path) {
-                                                Ok(doc) => state.load_document(doc, cx),
-                                                Err(err) => eprintln!("Open error: {err}"),
+                                        if state.pending_window_close {
+                                            state.pending_window_close = false;
+                                            state.show_unsaved_prompt = false;
+                                            cx.quit();
+                                        } else {
+                                            if let Some(path) = state.pending_open_path.take() {
+                                                match FileIo::open(&path) {
+                                                    Ok(doc) => state.load_document(doc, cx),
+                                                    Err(err) => eprintln!("Open error: {err}"),
+                                                }
                                             }
+                                            state.show_unsaved_prompt = false;
+                                            cx.notify();
                                         }
-                                        state.show_unsaved_prompt = false;
+                                    } else {
+                                        cx.notify();
                                     }
-                                    cx.notify();
                                 });
                             }),
                     ),

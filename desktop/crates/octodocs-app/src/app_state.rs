@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use adabraka_ui::prelude::*;
 use gpui::{Subscription, Task};
-use octodocs_core::{Document, DocumentBlock, Renderer};
+use octodocs_core::{Document, DocumentBlock, Renderer, markdown_to_doc_paragraphs};
 use octodocs_github::{GitHubSyncConfig, SyncStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,15 +50,13 @@ impl ViewMode {
 /// Central application state — one entity shared by all views.
 pub struct AppState {
     pub document: Document,
-    /// The document split into top-level blocks (WYSIWYG model).
+    /// The document split into top-level blocks (for the Split/Source preview pane).
     pub blocks: Vec<DocumentBlock>,
-    /// Index of the block currently open for inline editing, or `None` (all rendered).
-    pub active_block: Option<usize>,
     pub dirty: bool,
     /// Current view layout mode.
     pub view_mode: ViewMode,
-    /// Shared editor entity reused for whichever block is active (WYSIWYG mode).
-    pub editor_state: Entity<adabraka_ui::components::editor::EditorState>,
+    /// Word-style rich document editor (WYSIWYG mode).
+    pub doc_editor: Entity<DocumentEditorState>,
     /// Full-document editor for Source and Split modes.
     pub full_editor_state: Entity<adabraka_ui::components::editor::EditorState>,
     /// GitHub sync bindings: local root folder -> remote destination.
@@ -81,13 +79,19 @@ pub struct AppState {
     pub pending_open_path: Option<PathBuf>,
     /// Whether to show unsaved-change confirmation before opening sidebar file.
     pub show_unsaved_prompt: bool,
+    /// Set when the user clicked the window close button with unsaved changes.
+    /// The in-app modal will quit the app after Save/Discard when this is true.
+    pub pending_window_close: bool,
     /// Action to perform after authentication succeeds.
     pub pending_post_auth_action: Option<PostAuthAction>,
     _import_summary_version: u64,
     _sync_task: Option<Task<()>>,
     _summary_task: Option<Task<()>>,
-    _content_subscription: Subscription,
+    _doc_editor_subscription: Subscription,
     _full_content_subscription: Subscription,
+    /// Counts how many pending editor notifications were triggered by load_document
+    /// (not by the user). Observers skip marking dirty while this is > 0.
+    loading_doc: usize,
 }
 
 impl AppState {
@@ -213,15 +217,18 @@ impl AppState {
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let editor_state = cx.new(|cx| {
-            adabraka_ui::components::editor::EditorState::new(cx)
-        });
+        let doc_editor = cx.new(|cx| DocumentEditorState::new(cx));
         let full_editor_state = cx.new(|cx| {
             adabraka_ui::components::editor::EditorState::new(cx)
         });
 
         // When the full editor changes (Source/Split mode), sync document + blocks.
         let full_subscription = cx.observe(&full_editor_state, |this, _, cx| {
+            // Skip if this notification came from load_document, not from the user.
+            if this.loading_doc > 0 {
+                this.loading_doc -= 1;
+                return;
+            }
             if this.view_mode != ViewMode::Wysiwyg {
                 let content = this.full_editor_state.read(cx).content();
                 this.blocks = Renderer::parse_blocks(&content);
@@ -231,22 +238,18 @@ impl AppState {
             }
         });
 
-        // When the block editor changes, sync back to the active block.
-        let subscription = cx.observe(&editor_state, |this, _, cx| {
-            if let Some(idx) = this.active_block {
-                if idx < this.blocks.len() {
-                    let content = this.editor_state.read(cx).content();
-                    let node = Renderer::parse(&content)
-                        .0
-                        .into_iter()
-                        .next()
-                        .unwrap_or(octodocs_core::RenderNode::Paragraph(vec![]));
-                    this.blocks[idx].source = content.trim_end().to_string() + "\n";
-                    this.blocks[idx].node = node;
-                    this.document.content = DocumentBlock::reassemble(&this.blocks);
-                    this.dirty = true;
-                    cx.notify();
-                }
+        // When the doc_editor changes (WYSIWYG mode), sync markdown back to document.
+        let doc_editor_sub = cx.observe(&doc_editor, |this, _, cx| {
+            // Skip if this notification came from load_document, not from the user.
+            if this.loading_doc > 0 {
+                this.loading_doc -= 1;
+                return;
+            }
+            if this.view_mode == ViewMode::Wysiwyg {
+                let markdown = this.doc_editor.read(cx).to_markdown();
+                this.document.content = markdown;
+                this.dirty = true;
+                cx.notify();
             }
         });
 
@@ -260,6 +263,10 @@ impl AppState {
             }
         }
         let blocks = Renderer::parse_blocks(&document.content);
+
+        // Populate the word-style editor with the initial document.
+        let paragraphs = markdown_to_doc_paragraphs(&document.content);
+        doc_editor.update(cx, |editor, cx| editor.load_document(paragraphs, cx));
 
         let active_binding_idx = if github_bindings.is_empty() {
             None
@@ -276,10 +283,9 @@ impl AppState {
         Self {
             document,
             blocks,
-            active_block: None,
             dirty: false,
             view_mode: ViewMode::Wysiwyg,
-            editor_state,
+            doc_editor,
             full_editor_state,
             github_bindings,
             github_sync_status: SyncStatus::Idle,
@@ -291,11 +297,14 @@ impl AppState {
             active_binding_idx,
             pending_open_path: None,
             show_unsaved_prompt: false,
+            pending_window_close: false,
             pending_post_auth_action: None,
+            // One pending notification from the startup doc_editor.update() above.
+            loading_doc: 1,
             _import_summary_version: 0,
             _sync_task: None,
             _summary_task: None,
-            _content_subscription: subscription,
+            _doc_editor_subscription: doc_editor_sub,
             _full_content_subscription: full_subscription,
         }
     }
@@ -335,39 +344,25 @@ impl AppState {
         let going_wysiwyg = mode == ViewMode::Wysiwyg;
 
         if was_wysiwyg && !going_wysiwyg {
-            // Leaving WYSIWYG: load full document into the full editor.
-            let content = self.document.content.clone();
-            self.active_block = None;
+            // Leaving WYSIWYG: serialize doc_editor → full_editor_state + blocks.
+            let content = self.doc_editor.read(cx).to_markdown();
+            self.document.content = content.clone();
+            self.blocks = Renderer::parse_blocks(&content);
             self.full_editor_state.update(cx, |state, cx| {
                 state.set_content(&content, cx);
             });
         } else if !was_wysiwyg && going_wysiwyg {
-            // Returning to WYSIWYG: re-parse blocks from full editor content.
+            // Returning to WYSIWYG: re-parse markdown → doc_editor.
             let content = self.full_editor_state.read(cx).content();
             self.blocks = Renderer::parse_blocks(&content);
-            self.document.content = content;
-            self.active_block = None;
+            self.document.content = content.clone();
+            let paragraphs = markdown_to_doc_paragraphs(&content);
+            self.doc_editor.update(cx, |editor, cx| {
+                editor.load_document(paragraphs, cx);
+            });
         }
 
         self.view_mode = mode;
-        cx.notify();
-    }
-
-    /// Activate inline editing for block at `idx`.
-    pub fn activate_block(&mut self, idx: usize, cx: &mut Context<AppState>) {
-        if idx >= self.blocks.len() { return; }
-        self.active_block = Some(idx);
-        let src = self.blocks[idx].source.trim_end().to_string();
-        self.editor_state.update(cx, |state, cx| {
-            state.set_content(&src, cx);
-            state.place_cursor_at_end(cx);
-        });
-        cx.notify();
-    }
-
-    /// Deactivate block editing — all blocks return to rendered view.
-    pub fn deactivate_block(&mut self, cx: &mut Context<AppState>) {
-        self.active_block = None;
         cx.notify();
     }
 
@@ -375,7 +370,6 @@ impl AppState {
     pub fn new_document(&mut self, cx: &mut Context<AppState>) {
         self.document = Document::new();
         self.blocks = vec![];
-        self.active_block = None;
         self.dirty = false;
         self.github_sync_status = SyncStatus::Idle;
         self.last_synced_path = None;
@@ -386,8 +380,12 @@ impl AppState {
         self.active_binding_idx = None;
         self.pending_open_path = None;
         self.show_unsaved_prompt = false;
+        self.pending_window_close = false;
         self.pending_post_auth_action = None;
-        self.editor_state.update(cx, |state, cx| state.set_content("", cx));
+        self.loading_doc = 0; // reset any stale counter before incrementing
+        self.loading_doc += 1;
+        self.doc_editor.update(cx, |editor, cx| editor.load_document(vec![], cx));
+        self.loading_doc += 1;
         self.full_editor_state.update(cx, |state, cx| state.set_content("", cx));
         cx.notify();
     }
@@ -406,7 +404,8 @@ impl AppState {
     }
 
     pub fn open_file_from_sidebar(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
-        if self.document.path.as_ref() == Some(&path) || !self.dirty {
+        // Clicking the already-open file: just reload from disk.
+        if self.document.path.as_ref() == Some(&path) {
             match octodocs_core::FileIo::open(&path) {
                 Ok(doc) => self.load_document(doc, cx),
                 Err(err) => eprintln!("Open error: {err}"),
@@ -414,8 +413,8 @@ impl AppState {
             return;
         }
 
-        if self.document.path.is_some() {
-            self.save(cx);
+        // No unsaved changes: open directly.
+        if !self.dirty {
             match octodocs_core::FileIo::open(&path) {
                 Ok(doc) => self.load_document(doc, cx),
                 Err(err) => eprintln!("Open error: {err}"),
@@ -423,6 +422,7 @@ impl AppState {
             return;
         }
 
+        // Dirty document (with or without a saved path): always ask.
         self.pending_open_path = Some(path);
         self.show_unsaved_prompt = true;
         cx.notify();
@@ -432,10 +432,14 @@ impl AppState {
     pub fn load_document(&mut self, doc: Document, cx: &mut Context<AppState>) {
         let content = doc.content.clone();
         self.blocks = Renderer::parse_blocks(&content);
-        self.active_block = None;
-        self.editor_state.update(cx, |state, cx| state.set_content("", cx));
+        // Populate the word-style editor with the new content.
+        // Increment loading_doc so the observer doesn't mark dirty for these notifications.
+        let paragraphs = markdown_to_doc_paragraphs(&content);
+        self.loading_doc += 1;
+        self.doc_editor.update(cx, |editor, cx| editor.load_document(paragraphs, cx));
         // If currently in Source/Split, populate the full editor too.
         if self.view_mode != ViewMode::Wysiwyg {
+            self.loading_doc += 1;
             let c = content.clone();
             self.full_editor_state.update(cx, |state, cx| state.set_content(&c, cx));
         }
@@ -613,15 +617,6 @@ impl AppState {
         if self.active_binding_idx.is_none() && !self.github_bindings.is_empty() {
             self.active_binding_idx = Some(0);
         }
-        self.persist_github_bindings_to_disk();
-        self.persist_ui_state_to_disk();
-        self.github_sync_status = SyncStatus::Idle;
-        cx.notify();
-    }
-
-    pub fn clear_github_bindings(&mut self, cx: &mut Context<AppState>) {
-        self.github_bindings.clear();
-        self.active_binding_idx = None;
         self.persist_github_bindings_to_disk();
         self.persist_ui_state_to_disk();
         self.github_sync_status = SyncStatus::Idle;

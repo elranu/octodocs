@@ -162,6 +162,87 @@ pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyE
                 .children(list_items)
                 .into_any_element()
         }
+
+        RenderNode::Table { headers, rows } => {
+            let col_count = headers.len().max(1);
+
+            // Header row
+            let header_cells: Vec<AnyElement> = headers
+                .iter()
+                .map(|cell| {
+                    let content: Vec<AnyElement> = cell
+                        .iter()
+                        .map(|i| render_inline(i, theme))
+                        .collect();
+                    div()
+                        .flex_1()
+                        .px(px(10.0))
+                        .py(px(7.0))
+                        .border_r_1()
+                        .border_color(theme.tokens.border)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(2.0))
+                        .children(content)
+                        .into_any_element()
+                })
+                .collect();
+
+            let header_row = div()
+                .flex()
+                .bg(theme.tokens.muted)
+                .border_b_1()
+                .border_color(theme.tokens.border)
+                .children(header_cells)
+                .into_any_element();
+
+            // Data rows
+            let data_rows: Vec<AnyElement> = rows
+                .iter()
+                .enumerate()
+                .map(|(row_i, row)| {
+                    let cells: Vec<AnyElement> = (0..col_count)
+                        .map(|ci| {
+                            let cell_inlines =
+                                row.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+                            let content: Vec<AnyElement> = cell_inlines
+                                .iter()
+                                .map(|inline| render_inline(inline, theme))
+                                .collect();
+                            div()
+                                .flex_1()
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .border_r_1()
+                                .border_color(theme.tokens.border)
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(2.0))
+                                .children(content)
+                                .into_any_element()
+                        })
+                        .collect();
+                    div()
+                        .flex()
+                        .when(row_i % 2 == 1, |d| d.bg(theme.tokens.muted.opacity(0.2)))
+                        .border_b_1()
+                        .border_color(theme.tokens.border)
+                        .children(cells)
+                        .into_any_element()
+                })
+                .collect();
+
+            div()
+                .border_1()
+                .border_color(theme.tokens.border)
+                .rounded(px(4.0))
+                .my(px(8.0))
+                .overflow_hidden()
+                .child(header_row)
+                .children(data_rows)
+                .into_any_element()
+        }
     }
 }
 
@@ -243,6 +324,13 @@ fn render_inline(inline: &Inline, theme: &adabraka_ui::theme::Theme) -> AnyEleme
             .weight(gpui::FontWeight::BOLD)
             .into_any_element(),
         Inline::Italic(t) => Text::new(t.clone())
+            .italic()
+            .into_any_element(),
+        Inline::Underline(t) => Text::new(t.clone())
+            .underline()
+            .into_any_element(),
+        Inline::Strikethrough(t) => Text::new(t.clone())
+            .strikethrough()
             .into_any_element(),
         Inline::Code(t) => code_small(t.clone()).into_any_element(),
         Inline::Link { text, .. } => Text::new(text.clone())

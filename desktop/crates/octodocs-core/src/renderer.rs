@@ -40,6 +40,12 @@ pub enum RenderNode {
     ThematicBreak,
     BlockQuote(Vec<RenderNode>),
     List { ordered: bool, items: Vec<Vec<RenderNode>> },
+    /// A GFM table. `headers` is the header row; `rows` are the body rows.
+    /// Each cell is a list of `Inline` nodes (may have bold/italic etc.).
+    Table {
+        headers: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +53,8 @@ pub enum Inline {
     Text(String),
     Bold(String),
     Italic(String),
+    Underline(String),
+    Strikethrough(String),
     Code(String),
     Link { text: String, url: String },
     Image { alt: String, url: String },
@@ -136,6 +144,14 @@ impl Renderer {
         let mut code_buf = String::new();
         let mut bold = false;
         let mut italic = false;
+        let mut strikethrough = false;
+        let mut underline = false;
+        // Table state
+        let mut in_table_cell = false;
+        let mut table_headers: Vec<Vec<Inline>> = Vec::new();
+        let mut table_rows: Vec<Vec<Vec<Inline>>> = Vec::new();
+        let mut table_current_row: Vec<Vec<Inline>> = Vec::new();
+        let mut table_cell_buf: Vec<Inline> = Vec::new();
 
         for event in parser {
             match event {
@@ -151,6 +167,45 @@ impl Renderer {
                             text: heading_text.clone(),
                         });
                     }
+                }
+
+                // ── Tables ───────────────────────────────────────
+                Event::Start(Tag::Table(_)) => {
+                    in_table_cell = false;
+                    table_headers.clear();
+                    table_rows.clear();
+                    table_current_row.clear();
+                    table_cell_buf.clear();
+                }
+                Event::End(TagEnd::Table) => {
+                    nodes.push(RenderNode::Table {
+                        headers: table_headers.clone(),
+                        rows: table_rows.clone(),
+                    });
+                    table_headers.clear();
+                    table_rows.clear();
+                }
+                Event::Start(Tag::TableHead) => {
+                    table_current_row.clear();
+                }
+                Event::End(TagEnd::TableHead) => {
+                    table_headers = table_current_row.clone();
+                    table_current_row.clear();
+                }
+                Event::Start(Tag::TableRow) => { table_current_row.clear(); }
+                Event::End(TagEnd::TableRow) => {
+                    table_rows.push(table_current_row.clone());
+                    table_current_row.clear();
+                }
+                Event::Start(Tag::TableCell) => {
+                    in_table_cell = true;
+                    table_cell_buf.clear();
+                    bold = false; italic = false; strikethrough = false; underline = false;
+                }
+                Event::End(TagEnd::TableCell) => {
+                    in_table_cell = false;
+                    table_current_row.push(table_cell_buf.clone());
+                    table_cell_buf.clear();
                 }
 
                 // ── Paragraphs ────────────────────────────────────
@@ -201,12 +256,34 @@ impl Renderer {
                 Event::End(TagEnd::Strong) => bold = false,
                 Event::Start(Tag::Emphasis) => italic = true,
                 Event::End(TagEnd::Emphasis) => italic = false,
+                Event::Start(Tag::Strikethrough) => strikethrough = true,
+                Event::End(TagEnd::Strikethrough) => strikethrough = false,
+
+                Event::Html(html) | Event::InlineHtml(html) => {
+                    let token = html.trim().to_lowercase();
+                    if token == "<u>" || token == "<ins>" {
+                        underline = true;
+                    } else if token == "</u>" || token == "</ins>" {
+                        underline = false;
+                    }
+                }
 
                 // ── Text ──────────────────────────────────────────
                 Event::Text(text) => {
                     let s = text.into_string();
                     if in_code_block {
                         code_buf.push_str(&s);
+                    } else if in_table_cell {
+                        let inline = if bold {
+                            Inline::Bold(s)
+                        } else if italic {
+                            Inline::Italic(s)
+                        } else if strikethrough {
+                            Inline::Strikethrough(s)
+                        } else {
+                            Inline::Text(s)
+                        };
+                        table_cell_buf.push(inline);
                     } else if in_heading.is_some() {
                         heading_text.push_str(&s);
                     } else if in_paragraph {
@@ -214,7 +291,18 @@ impl Renderer {
                             Inline::Bold(s)
                         } else if italic {
                             Inline::Italic(s)
+                        } else if underline {
+                            Inline::Underline(s)
+                        } else if strikethrough {
+                            Inline::Strikethrough(s)
                         } else {
+                            // pulldown-cmark does not always emit emphasis events for
+                            // intraword forms like `IT*ALI*C`. Handle that common typing
+                            // pattern as a fallback so WYSIWYG matches user expectation.
+                            if let Some(inlines) = parse_intraword_italic_fallback(&s) {
+                                inline_buf.extend(inlines);
+                                continue;
+                            }
                             Inline::Text(s)
                         };
                         inline_buf.push(inline);
@@ -259,6 +347,54 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
     }
 }
 
+fn parse_intraword_italic_fallback(text: &str) -> Option<Vec<Inline>> {
+    if !text.contains('*') {
+        return None;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<Inline> = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < chars.len() {
+        let open = (cursor..chars.len()).find(|&i| chars[i] == '*');
+        let Some(open_idx) = open else {
+            break;
+        };
+
+        if open_idx > cursor {
+            out.push(Inline::Text(chars[cursor..open_idx].iter().collect()));
+        }
+
+        let close = (open_idx + 1..chars.len()).find(|&i| chars[i] == '*');
+        let Some(close_idx) = close else {
+            out.push(Inline::Text(chars[open_idx..].iter().collect()));
+            cursor = chars.len();
+            break;
+        };
+
+        if close_idx == open_idx + 1 {
+            out.push(Inline::Text("**".to_string()));
+            cursor = close_idx + 1;
+            continue;
+        }
+
+        let italic_text: String = chars[open_idx + 1..close_idx].iter().collect();
+        out.push(Inline::Italic(italic_text));
+        cursor = close_idx + 1;
+    }
+
+    if cursor < chars.len() {
+        out.push(Inline::Text(chars[cursor..].iter().collect()));
+    }
+
+    if out.is_empty() || (out.len() == 1 && matches!(out[0], Inline::Text(_))) {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────
@@ -299,6 +435,66 @@ mod tests {
             assert!(inlines.iter().any(|i| matches!(i, Inline::Bold(t) if t == "world")));
         } else {
             panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_paragraph_with_strikethrough() {
+        let tree = Renderer::parse("Hello ~~world~~");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines
+                    .iter()
+                    .any(|i| matches!(i, Inline::Strikethrough(t) if t == "world"))
+            );
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_paragraph_with_underline_tag() {
+        let tree = Renderer::parse("Hello <u>world</u>");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines
+                    .iter()
+                    .any(|i| matches!(i, Inline::Underline(t) if t == "world"))
+            );
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_intraword_italic_fallback() {
+        let tree = Renderer::parse("IT*ALI*C ITALIC");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines.iter().any(|i| matches!(i, Inline::Italic(t) if t == "ALI")),
+                "expected intraword italic fallback, got: {:?}",
+                inlines
+            );
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_gfm_table() {
+        let md = "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |\n";
+        let tree = Renderer::parse(md);
+        if let RenderNode::Table { headers, rows } = &tree.0[0] {
+            // Two header cells
+            assert_eq!(headers.len(), 2, "expected 2 header columns");
+            let h0: String = headers[0].iter().filter_map(|i| if let Inline::Text(t) = i { Some(t.clone()) } else { None }).collect();
+            assert_eq!(h0, "Name");
+            // Two data rows
+            assert_eq!(rows.len(), 2, "expected 2 data rows");
+            let r0c1: String = rows[0][1].iter().filter_map(|i| if let Inline::Text(t) = i { Some(t.clone()) } else { None }).collect();
+            assert_eq!(r0c1, "30");
+        } else {
+            panic!("expected RenderNode::Table, got: {:?}", tree.0);
         }
     }
 }

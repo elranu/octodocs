@@ -114,6 +114,7 @@ dependencies = [
  "bytes",
  "futures",
  "isahc",
+ "octodocs-core",
  "once_cell",
  "regex",
  "smallvec",

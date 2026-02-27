@@ -45,6 +45,7 @@ pub use crate::components::countdown::{
 pub use crate::components::date_picker::{DateFormat, DatePicker, DatePickerState};
 pub use crate::components::drag_drop::{DragData, Draggable, DropZone, DropZoneStyle};
 pub use crate::components::dropdown::{Dropdown, DropdownAlign, DropdownItem, DropdownState};
+pub use crate::components::document_editor::{DocumentEditor, DocumentEditorState, VisualLine};
 pub use crate::components::editor::{Editor, EditorState};
 pub use crate::components::empty_state::{EmptyState, EmptyStateSize};
 pub use crate::components::file_upload::{

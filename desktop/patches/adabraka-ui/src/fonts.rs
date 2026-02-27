@@ -55,10 +55,12 @@ const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf")
 const INTER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
+const INTER_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic.ttf");
 
 // Monospace
 const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 const JETBRAINS_MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
+const JETBRAINS_MONO_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
 
 /// Register all embedded fonts with GPUI
 ///
@@ -81,6 +83,7 @@ pub fn register_fonts(cx: &mut App) {
             INTER_MEDIUM.into(),
             INTER_SEMIBOLD.into(),
             INTER_BOLD.into(),
+            INTER_ITALIC.into(),
         ])
         .expect("Failed to load Inter fonts");
 
@@ -89,6 +92,7 @@ pub fn register_fonts(cx: &mut App) {
         .add_fonts(vec![
             JETBRAINS_MONO_REGULAR.into(),
             JETBRAINS_MONO_BOLD.into(),
+            JETBRAINS_MONO_ITALIC.into(),
         ])
         .expect("Failed to load JetBrains Mono fonts");
 }
