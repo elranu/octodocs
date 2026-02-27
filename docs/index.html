@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OctoDocs — Write. Save. Synced to GitHub.</title>
+  <meta name="description" content="A native desktop Markdown editor that automatically backs up everything to a GitHub repository. No terminal. No git. Just write." />
+  <meta property="og:title" content="OctoDocs" />
+  <meta property="og:description" content="Write. Save. Synced to GitHub." />
+  <meta property="og:image" content="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocsFull.svg" />
+  <link rel="icon" href="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" type="image/svg+xml" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --navy:     #072D56;
+      --blue:     #3C9ADA;
+      --blue-lt:  #8BC9F1;
+      --blue-dk:  #247EBD;
+      --red:      #F23F43;
+      --orange:   #F96D1B;
+      --green:    #26B450;
+      --yellow:   #FEC81D;
+      --bg:       #070e1a;
+      --bg2:      #0d1b2e;
+      --bg3:      #102040;
+      --border:   rgba(60,154,218,0.18);
+      --text:     #e8edf3;
+      --muted:    #7a9ab8;
+      --radius:   12px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── NAV ─────────────────────────────────────────── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 clamp(1.5rem, 5vw, 4rem);
+      height: 60px;
+      background: rgba(7,14,26,0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      display: flex; align-items: center; gap: .6rem;
+      font-weight: 700; font-size: 1.1rem; color: var(--text);
+      text-decoration: none;
+    }
+    .nav-logo img { height: 28px; }
+    .nav-links { display: flex; align-items: center; gap: 1.5rem; }
+    .nav-links a {
+      color: var(--muted); text-decoration: none; font-size: .9rem;
+      transition: color .15s;
+    }
+    .nav-links a:hover { color: var(--text); }
+    .btn {
+      display: inline-flex; align-items: center; gap: .45rem;
+      padding: .5rem 1.1rem; border-radius: 8px;
+      font-size: .9rem; font-weight: 600; text-decoration: none;
+      transition: filter .15s, transform .1s;
+      cursor: pointer; border: none;
+    }
+    .btn:hover { filter: brightness(1.12); transform: translateY(-1px); }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-outline {
+      background: transparent; color: var(--blue);
+      border: 1px solid var(--blue);
+    }
+    .btn-outline:hover { background: rgba(60,154,218,.1); }
+    .btn-ghost { background: rgba(255,255,255,.06); color: var(--text); }
+    .btn-lg { padding: .75rem 1.6rem; font-size: 1rem; border-radius: 10px; }
+    .btn-sm { padding: .35rem .85rem; font-size: .82rem; }
+
+    /* ── HERO ────────────────────────────────────────── */
+    .hero {
+      position: relative;
+      display: flex; flex-direction: column; align-items: center;
+      text-align: center;
+      padding: clamp(5rem, 10vw, 9rem) clamp(1.5rem, 5vw, 4rem) clamp(4rem, 8vw, 7rem);
+      overflow: hidden;
+    }
+    .hero::before {
+      content: "";
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse 80% 55% at 50% 0%, rgba(60,154,218,.16) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: .4rem;
+      background: rgba(60,154,218,.12);
+      border: 1px solid rgba(60,154,218,.3);
+      border-radius: 100px; padding: .3rem .9rem;
+      font-size: .78rem; color: var(--blue-lt); margin-bottom: 1.8rem;
+      letter-spacing: .04em; text-transform: uppercase; font-weight: 600;
+    }
+    .hero h1 {
+      font-size: clamp(2.4rem, 6vw, 4.2rem);
+      font-weight: 800; line-height: 1.1;
+      letter-spacing: -.02em;
+      max-width: 820px;
+      background: linear-gradient(135deg, #ffffff 0%, var(--blue-lt) 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero p {
+      margin-top: 1.4rem;
+      font-size: clamp(1rem, 2.5vw, 1.2rem);
+      color: var(--muted);
+      max-width: 580px;
+    }
+    .hero-actions {
+      display: flex; flex-wrap: wrap; gap: .75rem;
+      justify-content: center;
+      margin-top: 2.4rem;
+    }
+    .hero-logo {
+      margin-top: 3.5rem;
+      filter: drop-shadow(0 0 48px rgba(60,154,218,.35));
+      width: clamp(160px, 28vw, 260px);
+    }
+
+    /* ── SECTION SHARED ──────────────────────────────── */
+    section { padding: clamp(4rem, 8vw, 7rem) clamp(1.5rem, 5vw, 4rem); }
+    .container { max-width: 1080px; margin: 0 auto; }
+    .section-label {
+      font-size: .78rem; font-weight: 700; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--blue); margin-bottom: .6rem;
+    }
+    .section-title {
+      font-size: clamp(1.6rem, 3.5vw, 2.4rem);
+      font-weight: 800; line-height: 1.15; letter-spacing: -.02em;
+    }
+    .section-sub {
+      color: var(--muted); margin-top: .8rem;
+      font-size: clamp(.95rem, 2vw, 1.05rem); max-width: 540px;
+    }
+
+    /* ── FEATURES ────────────────────────────────────── */
+    #features { background: var(--bg2); }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1.25rem;
+      margin-top: 3rem;
+    }
+    .feature-card {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.6rem 1.5rem;
+      transition: border-color .2s, transform .2s;
+    }
+    .feature-card:hover {
+      border-color: rgba(60,154,218,.4);
+      transform: translateY(-3px);
+    }
+    .feature-icon {
+      width: 40px; height: 40px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.2rem; margin-bottom: 1rem;
+    }
+    .feature-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: .4rem; }
+    .feature-card p { font-size: .9rem; color: var(--muted); line-height: 1.55; }
+
+    /* ── HOW IT WORKS ────────────────────────────────── */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 2rem;
+      margin-top: 3rem;
+    }
+    .step { display: flex; flex-direction: column; align-items: flex-start; gap: .6rem; }
+    .step-num {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: rgba(60,154,218,.15);
+      border: 1px solid var(--blue);
+      display: flex; align-items: center; justify-content: center;
+      font-size: .85rem; font-weight: 800; color: var(--blue);
+      flex-shrink: 0;
+    }
+    .step h3 { font-size: .95rem; font-weight: 700; }
+    .step p { font-size: .88rem; color: var(--muted); }
+
+    /* ── DOWNLOAD ────────────────────────────────────── */
+    #download { background: var(--bg2); }
+    .os-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1.25rem;
+      margin-top: 3rem;
+    }
+    .os-card {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.8rem 1.6rem;
+      display: flex; flex-direction: column; gap: 1rem;
+    }
+    .os-header { display: flex; align-items: center; gap: .75rem; }
+    .os-icon {
+      width: 44px; height: 44px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.5rem;
+    }
+    .os-name { font-size: 1.05rem; font-weight: 700; }
+    .os-arch { font-size: .78rem; color: var(--muted); }
+    .code-block {
+      background: rgba(0,0,0,.4);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: .75rem 1rem;
+      font-family: "SF Mono", "Fira Code", Consolas, monospace;
+      font-size: .82rem; color: var(--blue-lt);
+      overflow-x: auto; white-space: pre;
+    }
+    .os-note {
+      font-size: .8rem; color: var(--muted);
+      padding: .6rem .85rem;
+      background: rgba(254,200,29,.06);
+      border-left: 2px solid var(--yellow);
+      border-radius: 4px;
+    }
+    .os-note strong { color: var(--text); }
+
+    /* ── SPONSORS ────────────────────────────────────── */
+    #sponsor {
+      text-align: center;
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+    }
+    .sponsor-inner {
+      max-width: 680px; margin: 0 auto;
+    }
+    .sponsor-heart {
+      font-size: 3rem; margin-bottom: 1rem; display: block;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.1); }
+    }
+    .sponsor-perks {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: .75rem;
+      margin-top: 2.5rem; text-align: left;
+    }
+    .perk {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1rem;
+      font-size: .85rem;
+    }
+    .perk span { font-size: 1.2rem; display: block; margin-bottom: .35rem; }
+    .perk strong { display: block; font-size: .9rem; margin-bottom: .2rem; }
+    .perk p { color: var(--muted); font-size: .82rem; }
+    .sponsor-actions {
+      display: flex; flex-wrap: wrap; gap: .75rem;
+      justify-content: center; margin-top: 2.5rem;
+    }
+    .btn-sponsor {
+      background: linear-gradient(135deg, #ea4aaa, #f86eba);
+      color: #fff; border: none;
+    }
+
+    /* ── FOOTER ──────────────────────────────────────── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2.5rem clamp(1.5rem, 5vw, 4rem);
+      display: flex; flex-wrap: wrap; align-items: center;
+      justify-content: space-between; gap: 1rem;
+    }
+    .footer-left { display: flex; align-items: center; gap: .75rem; }
+    .footer-left img { height: 22px; }
+    .footer-left span { font-size: .85rem; color: var(--muted); }
+    .footer-right { display: flex; gap: 1.2rem; }
+    .footer-right a { color: var(--muted); font-size: .85rem; text-decoration: none; }
+    .footer-right a:hover { color: var(--text); }
+
+    /* ── RESPONSIVE ──────────────────────────────────── */
+    @media (max-width: 640px) {
+      .nav-links .hide-mobile { display: none; }
+      .hero-logo { width: 140px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── NAV ─────────────────────────────────────────── -->
+<nav>
+  <a href="#" class="nav-logo">
+    <img src="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" alt="OctoDocs" />
+    OctoDocs
+  </a>
+  <div class="nav-links">
+    <a href="#features" class="hide-mobile">Features</a>
+    <a href="#download" class="hide-mobile">Download</a>
+    <a href="#sponsor" class="hide-mobile">Sponsor</a>
+    <a href="https://github.com/elranu/octodocs" class="btn btn-ghost btn-sm" target="_blank" rel="noopener">
+      <svg height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+    <a href="#download" class="btn btn-primary btn-sm">Download</a>
+  </div>
+</nav>
+
+<!-- ── HERO ────────────────────────────────────────── -->
+<header class="hero">
+  <div class="hero-badge">Open Source · Native Desktop · v0.1</div>
+  <h1>Write. Save.<br>Synced to GitHub.</h1>
+  <p>A native desktop Markdown editor where every Ctrl+S automatically backs up your document to a GitHub repository. No terminal. No git commands. No merge conflicts.</p>
+  <div class="hero-actions">
+    <a href="#download" class="btn btn-primary btn-lg">
+      ↓ &nbsp;Download Free
+    </a>
+    <a href="https://github.com/elranu/octodocs" class="btn btn-outline btn-lg" target="_blank" rel="noopener">
+      View on GitHub
+    </a>
+  </div>
+  <img class="hero-logo"
+    src="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocsFull.svg"
+    alt="OctoDocs mascot" />
+</header>
+
+<!-- ── FEATURES ────────────────────────────────────── -->
+<section id="features">
+  <div class="container">
+    <p class="section-label">What it does</p>
+    <h2 class="section-title">Everything you need, nothing you don't</h2>
+    <p class="section-sub">Built for writers who want their work safe in GitHub — without ever touching a terminal.</p>
+
+    <div class="features-grid">
+
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(60,154,218,.15);">✍️</div>
+        <h3>WYSIWYG Markdown Editor</h3>
+        <p>A single continuous document surface — Word/Docs-style. Headings, bold, italic, code, underline, and strikethrough rendered in real time. No raw syntax visible while editing.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(38,180,80,.15);">☁️</div>
+        <h3>Push on Every Save</h3>
+        <p>Press Ctrl+S and your document is pushed to GitHub automatically. No staging, committing, or pushing. The status badge in the corner tells you it worked.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(249,109,27,.15);">📂</div>
+        <h3>File Explorer Sidebar</h3>
+        <p>Browse and manage all your Markdown files in a tree view. Create files and folders. Rename them. Everything reflects on GitHub immediately.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(254,200,29,.15);">🔷</div>
+        <h3>Mermaid Diagrams</h3>
+        <p>Write Mermaid code blocks and see full-color flowcharts and sequence diagrams rendered inline — no browser, no Node.js, pure Rust renderer.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(242,63,67,.15);">🔗</div>
+        <h3>Multi-Repo Support</h3>
+        <p>Connect multiple GitHub repositories. Each local folder maps to a different repo, branch, and folder — all managed from one app.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon" style="background:rgba(139,201,241,.15);">⚡</div>
+        <h3>60-Second Onboarding</h3>
+        <p>On first launch, the app walks you through GitHub login via OAuth device flow and repo selection. You're writing in under a minute — no configuration screens.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ────────────────────────────────── -->
+<section id="how">
+  <div class="container">
+    <p class="section-label">How it works</p>
+    <h2 class="section-title">As simple as four steps</h2>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Open OctoDocs</h3>
+        <p>The app walks you through connecting your GitHub account via OAuth device flow — no passwords, no SSH keys.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Pick a repo &amp; folder</h3>
+        <p>Choose where your documents live. OctoDocs imports any existing <code>.md</code> files from that folder automatically.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Write</h3>
+        <p>Use the WYSIWYG editor. Formatting is rendered as you type. No Markdown syntax visible unless you want it.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <h3>Save</h3>
+        <p>Ctrl+S saves locally <em>and</em> pushes to GitHub in the background. A status badge confirms the sync.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DOWNLOAD ────────────────────────────────────── -->
+<section id="download">
+  <div class="container">
+    <p class="section-label">Get started</p>
+    <h2 class="section-title">Download OctoDocs</h2>
+    <p class="section-sub">Free and open source. Pre-built binaries for Linux, macOS, and Windows (experimental).</p>
+
+    <div class="os-grid">
+
+      <!-- Linux -->
+      <div class="os-card">
+        <div class="os-header">
+          <div class="os-icon" style="background:rgba(249,109,27,.12); font-size:1.6rem;">🐧</div>
+          <div>
+            <div class="os-name">Linux</div>
+            <div class="os-arch">x86_64</div>
+          </div>
+        </div>
+        <div class="code-block">curl -f https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh</div>
+        <p style="font-size:.82rem;color:var(--muted);">Installs to <code style="color:var(--blue-lt)">~/.local/octodocs/</code> and adds <code style="color:var(--blue-lt)">octodocs</code> to your PATH.</p>
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-linux-x86_64.tar.gz"
+           class="btn btn-outline" style="align-self:flex-start;">
+          ↓ &nbsp;Download .tar.gz
+        </a>
+      </div>
+
+      <!-- macOS -->
+      <div class="os-card">
+        <div class="os-header">
+          <div class="os-icon" style="background:rgba(60,154,218,.12); font-size:1.6rem;">🍎</div>
+          <div>
+            <div class="os-name">macOS</div>
+            <div class="os-arch">Apple Silicon (aarch64)</div>
+          </div>
+        </div>
+        <p style="font-size:.88rem;color:var(--muted);">Download the DMG, open it, and drag <strong style="color:var(--text)">OctoDocs</strong> to <code style="color:var(--blue-lt)">/Applications</code>.</p>
+        <div class="os-note">
+          <strong>Unsigned app.</strong> On first launch, right-click → <strong>Open</strong>, or go to System Settings → Privacy &amp; Security → <strong>Open Anyway</strong>.
+        </div>
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-macos-aarch64.dmg"
+           class="btn btn-outline" style="align-self:flex-start;">
+          ↓ &nbsp;Download .dmg
+        </a>
+      </div>
+
+      <!-- Windows -->
+      <div class="os-card">
+        <div class="os-header">
+          <div class="os-icon" style="background:rgba(38,180,80,.12); font-size:1.6rem;">🪟</div>
+          <div>
+            <div class="os-name">Windows</div>
+            <div class="os-arch">x86_64 · Experimental</div>
+          </div>
+        </div>
+        <p style="font-size:.88rem;color:var(--muted);">Download the ZIP, extract it, and run <code style="color:var(--blue-lt)">octodocs-app.exe</code>.</p>
+        <div class="os-note">
+          <strong>Unsigned binary.</strong> SmartScreen will warn you. Click <strong>"More info" → "Run anyway"</strong> to launch.
+        </div>
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-windows-x86_64.zip"
+           class="btn btn-outline" style="align-self:flex-start;">
+          ↓ &nbsp;Download .zip
+        </a>
+      </div>
+
+    </div>
+
+    <!-- Build from source -->
+    <div style="margin-top:3rem; background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius); padding:1.8rem;">
+      <h3 style="margin-bottom:1rem; font-size:1rem;">Build from Source</h3>
+      <p style="font-size:.88rem;color:var(--muted);margin-bottom:1rem;">Requires <a href="https://rustup.rs/" style="color:var(--blue);" target="_blank" rel="noopener">Rust</a> (nightly — selected automatically via <code>rust-toolchain.toml</code>).</p>
+      <div class="code-block">git clone https://github.com/elranu/octodocs.git
+cd octodocs/desktop
+cargo run -p octodocs-app</div>
+      <p style="font-size:.82rem;color:var(--muted);margin-top:.8rem;">
+        Linux also needs:
+        <code style="color:var(--blue-lt);">libxcb1-dev libxkbcommon-dev libwayland-dev libvulkan-dev libsecret-1-dev libfontconfig-dev libasound2-dev libssl-dev</code>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── SPONSOR ────────────────────────────────────── -->
+<section id="sponsor">
+  <div class="container">
+    <div class="sponsor-inner">
+      <span class="sponsor-heart">💙</span>
+      <p class="section-label" style="text-align:center;">Support the project</p>
+      <h2 class="section-title" style="text-align:center;">Help keep OctoDocs free</h2>
+      <p class="section-sub" style="margin:0 auto; text-align:center;">OctoDocs is built and maintained in spare time at zero cost to users. If it saves you time, consider sponsoring its development.</p>
+
+      <div class="sponsor-perks">
+        <div class="perk">
+          <span>🚀</span>
+          <strong>Faster releases</strong>
+          <p>Sponsorship lets me spend more time shipping features and fixes.</p>
+        </div>
+        <div class="perk">
+          <span>🔒</span>
+          <strong>Stay independent</strong>
+          <p>No ads, no tracking, no VC. Just a free tool that works.</p>
+        </div>
+        <div class="perk">
+          <span>🗺️</span>
+          <strong>Shape the roadmap</strong>
+          <p>Sponsors can vote on which features land next.</p>
+        </div>
+        <div class="perk">
+          <span>♾️</span>
+          <strong>Always open source</strong>
+          <p>Your support ensures the code stays MIT-licensed forever.</p>
+        </div>
+      </div>
+
+      <div class="sponsor-actions">
+        <a href="https://github.com/sponsors/elranu"
+           class="btn btn-sponsor btn-lg" target="_blank" rel="noopener">
+          ♥ &nbsp;Sponsor on GitHub
+        </a>
+        <a href="https://github.com/elranu/octodocs"
+           class="btn btn-ghost btn-lg" target="_blank" rel="noopener">
+          ⭐ &nbsp;Star on GitHub
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ────────────────────────────────────── -->
+<footer>
+  <div class="footer-left">
+    <img src="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" alt="OctoDocs" />
+    <span>OctoDocs — MIT License</span>
+  </div>
+  <div class="footer-right">
+    <a href="https://github.com/elranu/octodocs" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/elranu/octodocs/releases" target="_blank" rel="noopener">Releases</a>
+    <a href="https://github.com/elranu/octodocs/issues" target="_blank" rel="noopener">Issues</a>
+    <a href="https://github.com/sponsors/elranu" target="_blank" rel="noopener">Sponsor</a>
+  </div>
+</footer>
+
+</body>
+</html>
