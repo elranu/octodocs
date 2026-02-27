@@ -727,7 +727,7 @@ impl RepoAddModal {
                             }),
                     )
                     .child(
-                        body_small(&format!("{} repositories", filtered_repos.len()))
+                        body_small(format!("{} repositories", filtered_repos.len()))
                             .color(theme.tokens.muted_foreground),
                     )
                     .child(self.render_repo_list(&filtered_repos, &weak))

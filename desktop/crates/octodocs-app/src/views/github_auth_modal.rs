@@ -61,6 +61,7 @@ pub enum AuthState {
     },
 }
 
+#[allow(clippy::type_complexity)]
 pub struct GithubAuthModal {
     app_state: Entity<AppState>,
     state: AuthState,
@@ -69,6 +70,7 @@ pub struct GithubAuthModal {
 }
 
 impl GithubAuthModal {
+    #[allow(clippy::type_complexity)]
     pub fn new(
         app_state: Entity<AppState>,
         on_authenticated: Box<dyn Fn(String, &mut Context<GithubAuthModal>)>,

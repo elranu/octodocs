@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Linux (primary, blocking)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build · Linux x86_64
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            vulkan-validationlayers \
+            libsecret-1-dev \
+            libfontconfig-dev \
+            libasound2-dev \
+            libssl-dev
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Clippy (required gate)
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Tests
+        run: cargo test -p octodocs-core
+
+      - name: Build release binary
+        run: cargo build --release -p octodocs-app
+
+      - name: Package artifact
+        run: |
+          tar -czf octodocs-linux-x86_64.tar.gz \
+            -C target/release octodocs-app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octodocs-linux-x86_64.tar.gz
+          path: desktop/octodocs-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # macOS (experimental, non-blocking)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build · macOS aarch64
+    runs-on: macos-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Build release binary
+        run: cargo build --release -p octodocs-app
+
+      - name: Create .app bundle
+        run: |
+          mkdir -p OctoDocs.app/Contents/MacOS
+          cp target/release/octodocs-app OctoDocs.app/Contents/MacOS/octodocs
+          cat > OctoDocs.app/Contents/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>octodocs</string>
+              <key>CFBundleIdentifier</key><string>io.github.elranu.octodocs</string>
+              <key>CFBundleName</key><string>OctoDocs</string>
+              <key>CFBundleDisplayName</key><string>OctoDocs</string>
+              <key>CFBundleVersion</key><string>1.0</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>LSMinimumSystemVersion</key><string>10.15</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "OctoDocs" \
+            -srcfolder OctoDocs.app \
+            -ov -format UDZO \
+            octodocs-macos-aarch64.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octodocs-macos-aarch64.dmg
+          path: desktop/octodocs-macos-aarch64.dmg
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Windows (experimental, non-blocking)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build · Windows x86_64
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Build release binary
+        run: cargo build --release -p octodocs-app
+
+      - name: Package artifact
+        run: |
+          Compress-Archive `
+            -Path target\release\octodocs-app.exe `
+            -DestinationPath octodocs-windows-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octodocs-windows-x86_64.zip
+          path: desktop/octodocs-windows-x86_64.zip
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GitHub Release (requires Linux; macOS & Windows are optional extras)
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-linux, build-macos, build-windows]
+    # Run even if macOS/Windows jobs failed — they're continue-on-error
+    if: always() && needs.build-linux.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Linux artifact (required)
+        uses: actions/download-artifact@v4
+        with:
+          name: octodocs-linux-x86_64.tar.gz
+          path: dist/
+
+      - name: Download macOS artifact (optional)
+        if: needs.build-macos.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: octodocs-macos-aarch64.dmg
+          path: dist/
+
+      - name: Download Windows artifact (optional)
+        if: needs.build-windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: octodocs-windows-x86_64.zip
+          path: dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### Linux (x86_64)
+            ```bash
+            curl -f https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
+            ```
+            Or manually: extract `octodocs-linux-x86_64.tar.gz` and run `./octodocs-app`
+
+            ### macOS (Apple Silicon)
+            Download `octodocs-macos-aarch64.dmg`, open it, and drag **OctoDocs** to `/Applications`.
+            > **Note:** The app is unsigned. Right-click → **Open** on first launch, or:
+            > System Settings → Privacy & Security → **Open Anyway**
+
+            ### Windows (x86_64)
+            > **Note:** The binary is unsigned. Windows SmartScreen will warn you.
+            > Click **"More info" → "Run anyway"** to launch.
+
+            ---
+            *macOS and Windows builds are experimental and may not be available for every release.*
+          files: |
+            dist/octodocs-linux-x86_64.tar.gz
+            dist/octodocs-macos-aarch64.dmg
+            dist/octodocs-windows-x86_64.zip

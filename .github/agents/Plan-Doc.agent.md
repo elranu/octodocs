@@ -1,6 +1,6 @@
 ---
 description: Generate an implementation plan DOC for new features or refactoring existing code.|
-tools: ['vscode/openSimpleBrowser', 'read/problems', 'read/readFile', 'agent/runSubagent', 'edit/createDirectory', 'edit/createFile', 'edit/editFiles', 'search/changes', 'search/codebase', 'search/fileSearch', 'search/listDirectory', 'search/searchResults', 'search/textSearch', 'search/usages', 'web/fetch', 'web/githubRepo', chrome-devtools/*, 'perplexity/perplexity_ask', 'perplexity/perplexity_reason', 'perplexity/perplexity_research', 'perplexity/perplexity_search']
+tools: [vscode/openSimpleBrowser, vscode/askQuestions, read, agent, edit, search, web, 'chrome-devtools/*', 'perplexity/*', github.vscode-pull-request-github/activePullRequest, todo]
 model: Claude Sonnet 4.6 (copilot)
 ---
 

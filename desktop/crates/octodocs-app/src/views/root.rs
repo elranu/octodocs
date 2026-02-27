@@ -30,7 +30,7 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
-        let app_state = cx.new(|cx| AppState::new(cx));
+        let app_state = cx.new(AppState::new);
         let document_editor_pane = cx.new(|_| DocumentEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
@@ -318,7 +318,7 @@ impl RootView {
         if should_force_onboarding {
             match get_stored_token() {
                 Ok(Some(_)) => {
-                    let _ = app_state.update(cx, |state, cx| {
+                    app_state.update(cx, |state, cx| {
                         state.repo_add_modal_open = true;
                         state.auth_modal_open = false;
                         state.sidebar_open = true;
@@ -326,14 +326,14 @@ impl RootView {
                     });
                 }
                 _ => {
-                    let _ = app_state.update(cx, |state, cx| {
+                    app_state.update(cx, |state, cx| {
                         state.pending_post_auth_action = Some(PostAuthAction::AddRepo);
                         state.auth_modal_open = true;
                         state.repo_add_modal_open = false;
                         state.sidebar_open = true;
                         cx.notify();
                     });
-                    let _ = github_auth_modal.update(cx, |modal, cx| modal.init(cx));
+                    github_auth_modal.update(cx, |modal, cx| modal.init(cx));
                 }
             }
         }
@@ -379,7 +379,7 @@ impl Render for RootView {
 
         if repo_add_modal_open {
             if let Ok(Some(token)) = get_stored_token() {
-                let _ = self.repo_add_modal.update(cx, |modal, cx| {
+                self.repo_add_modal.update(cx, |modal, cx| {
                     modal.set_auth_token(token, cx);
                 });
             }

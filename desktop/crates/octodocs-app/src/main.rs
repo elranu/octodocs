@@ -88,7 +88,7 @@ fn main() {
                         // Set the pending-close flag and open the existing unsaved-prompt
                         // modal. The modal's Save/Discard buttons call cx.quit() when
                         // pending_window_close is set.
-                        let _ = app_state.update(cx, |state, cx| {
+                        app_state.update(cx, |state, cx| {
                             state.pending_window_close = true;
                             state.show_unsaved_prompt = true;
                             cx.notify();
