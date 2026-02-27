@@ -138,6 +138,9 @@ pub struct DocumentEditorState {
     /// True once the mouse has moved with the left button held (distinguishes
     /// a drag from a simple click so we know whether to clear the selection).
     pub drag_occurred: bool,
+    /// Active table cell: (row, col) where row=0 is the header row.
+    /// Set when the user clicks on a table cell or navigates with Tab.
+    pub table_cursor: Option<(usize, usize)>,
 }
 
 impl DocumentEditorState {
@@ -152,6 +155,7 @@ impl DocumentEditorState {
             last_bounds: None,
             drag_anchor: None,
             drag_occurred: false,
+            table_cursor: None,
         }
     }
 
@@ -168,6 +172,7 @@ impl DocumentEditorState {
         self.layout_cache.clear();
         self.drag_anchor = None;
         self.drag_occurred = false;
+        self.table_cursor = None;
         cx.notify();
     }
 
@@ -586,6 +591,36 @@ impl DocumentEditorState {
     // ── Text mutation ─────────────────────────────────────────────────────────
 
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // ── Table cell editing ─────────────────────────────────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                if text == "\n" {
+                    // Enter: add a new row after the current row
+                    let (_, row_count) = match &self.paragraphs[para_idx].kind {
+                        ParagraphKind::Table { headers, rows, .. } => (headers.len(), rows.len()),
+                        _ => unreachable!(),
+                    };
+                    self.table_add_row_at(para_idx, tr.min(row_count));
+                    self.table_cursor = Some((tr + 1, 0));
+                    self.cursor.char_offset = 0;
+                } else {
+                    let offset = self.cursor.char_offset;
+                    if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                        let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                        let char_count = cell.chars().count();
+                        let safe_off = offset.min(char_count);
+                        let byte_off = cell.char_indices().nth(safe_off).map(|(i, _)| i).unwrap_or(cell.len());
+                        cell.insert_str(byte_off, text);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                        self.cursor.char_offset = safe_off + text.chars().count();
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+        // ────────────────────────────────────────────────────────────────────────
         if let Some(_) = self.selection {
             let at = self.delete_selection(cx);
             self.cursor = at;
@@ -611,6 +646,31 @@ impl DocumentEditorState {
     }
 
     pub fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        // ── Table cell backspace ───────────────────────────────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                if self.cursor.char_offset > 0 {
+                    let offset = self.cursor.char_offset;
+                    if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                        let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                        let del_at = offset - 1;
+                        let byte_range = {
+                            let mut iter = cell.char_indices();
+                            let start = iter.nth(del_at).map(|(i, _)| i).unwrap_or(cell.len());
+                            let end = iter.next().map(|(i, _)| i).unwrap_or(cell.len());
+                            start..end
+                        };
+                        cell.drain(byte_range);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                        self.cursor.char_offset = del_at;
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+        // ────────────────────────────────────────────────────────────────────────
         if self.selection.is_some() {
             let at = self.delete_selection(cx);
             self.cursor = at;
@@ -663,6 +723,37 @@ impl DocumentEditorState {
     }
 
     pub fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        // ── Table: navigate between cells ─────────────────────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            let (col_count, row_count) = match &self.paragraphs[para_idx].kind {
+                ParagraphKind::Table { headers, rows, .. } => (headers.len(), rows.len()),
+                _ => { self.insert_text("    ", cx); return; }
+            };
+            let next_tc = tc + 1;
+            if next_tc < col_count {
+                // Move to next cell in the same row
+                let cell_len = self.table_cell_text(para_idx, tr, next_tc).chars().count();
+                self.table_cursor = Some((tr, next_tc));
+                self.cursor.char_offset = cell_len;
+            } else {
+                let next_tr = tr + 1;
+                if next_tr <= row_count {
+                    // First cell of the next row
+                    let cell_len = self.table_cell_text(para_idx, next_tr, 0).chars().count();
+                    self.table_cursor = Some((next_tr, 0));
+                    self.cursor.char_offset = cell_len;
+                } else {
+                    // Past the last row: add a new one
+                    self.table_add_row_at(para_idx, row_count);
+                    self.table_cursor = Some((row_count + 1, 0));
+                    self.cursor.char_offset = 0;
+                }
+            }
+            cx.notify();
+            return;
+        }
+        // ────────────────────────────────────────────────────────────────────────
         self.insert_text("    ", cx);
     }
 
@@ -817,6 +908,131 @@ impl DocumentEditorState {
         cx.notify();
     }
 
+    /// Insert a blank 3-column / 2-row GFM table after the current paragraph.
+    pub fn insert_table(&mut self, cx: &mut Context<Self>) {
+        let source = "| Column 1 | Column 2 | Column 3 |\n| --- | --- | --- |\n| Cell | Cell | Cell |\n| Cell | Cell | Cell |\n".to_string();
+        let headers = vec!["Column 1".to_string(), "Column 2".to_string(), "Column 3".to_string()];
+        let rows = vec![
+            vec!["Cell".to_string(), "Cell".to_string(), "Cell".to_string()],
+            vec!["Cell".to_string(), "Cell".to_string(), "Cell".to_string()],
+        ];
+        let para = DocParagraph {
+            kind: ParagraphKind::Table { source, headers, rows },
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+        };
+        let insert_at = self.cursor.para_idx + 1;
+        self.paragraphs.insert(insert_at, para);
+        self.cursor = DocCursor { para_idx: insert_at, char_offset: 0 };
+        cx.notify();
+    }
+
+    // ── Table cell helpers ─────────────────────────────────────────────────────
+
+    /// Return a copy of the text in table cell (row, col).
+    /// row=0 is the header row; row≥1 is data row (row-1).
+    fn table_cell_text(&self, para_idx: usize, row: usize, col: usize) -> String {
+        match &self.paragraphs[para_idx].kind {
+            ParagraphKind::Table { headers, rows, .. } => {
+                if row == 0 {
+                    headers.get(col).cloned().unwrap_or_default()
+                } else {
+                    rows.get(row - 1).and_then(|r| r.get(col)).cloned().unwrap_or_default()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Insert an empty data row at `data_idx` (0-indexed within rows).
+    fn table_add_row_at(&mut self, para_idx: usize, data_idx: usize) {
+        if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+            let col_count = headers.len();
+            rows.insert(data_idx.min(rows.len()), vec![String::new(); col_count]);
+            *source = gfm_rebuild_from_strings(headers, rows);
+        }
+    }
+
+    /// Add a data row after the active row (or at the bottom if no cell is active).
+    pub fn add_table_row(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        if !matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+            return;
+        }
+        let row_count = match &self.paragraphs[para_idx].kind {
+            ParagraphKind::Table { rows, .. } => rows.len(),
+            _ => return,
+        };
+        let insert_at = match self.table_cursor {
+            Some((tr, _)) => tr.min(row_count),
+            None => row_count,
+        };
+        self.table_add_row_at(para_idx, insert_at);
+        self.table_cursor = Some((insert_at + 1, 0));
+        self.cursor.char_offset = 0;
+        cx.notify();
+    }
+
+    /// Remove the currently active data row. No-op if the header is active.
+    pub fn remove_table_row(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        if let Some((tr, _)) = self.table_cursor {
+            if tr == 0 { return; }
+            if let ParagraphKind::Table { rows, headers, source } = &mut self.paragraphs[para_idx].kind {
+                let data_idx = tr - 1;
+                if data_idx < rows.len() {
+                    rows.remove(data_idx);
+                    *source = gfm_rebuild_from_strings(headers, rows);
+                    let new_tr = if rows.is_empty() { 0 } else { (data_idx + 1).min(rows.len()) };
+                    self.table_cursor = Some((new_tr, 0));
+                    self.cursor.char_offset = 0;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Add a column to the right of the active column (or at the end).
+    pub fn add_table_column(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+            let insert_at = match self.table_cursor {
+                Some((_, tc)) => (tc + 1).min(headers.len()),
+                None => headers.len(),
+            };
+            headers.insert(insert_at, format!("Column {}", headers.len() + 1));
+            for row in rows.iter_mut() {
+                row.insert(insert_at.min(row.len()), String::new());
+            }
+            *source = gfm_rebuild_from_strings(headers, rows);
+        }
+        cx.notify();
+    }
+
+    /// Map a click position to the (row, col) of the table cell under the cursor,
+    /// or None if the click is not inside any table bounds.
+    pub fn table_cell_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<(usize, usize)> {
+        let left = bounds.left() + px(LEFT_MARGIN);
+        let vl = self.layout_cache.iter().rev().find(|vl|
+            bounds.top() + px(vl.top_px) <= point.y
+        )?;
+        let para_idx = vl.para_idx;
+        if let ParagraphKind::Table { headers, rows, .. } = &self.paragraphs[para_idx].kind {
+            let col_count = headers.len().max(1);
+            let table_top = bounds.top() + px(vl.top_px);
+            let table_bottom = table_top + px(vl.height_px);
+            if point.y < table_top || point.y > table_bottom { return None; }
+            let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+            let col_w_f32: f32 = table_w / px(col_count as f32);
+            let rel_x: Pixels = (point.x - left).max(px(0.0));
+            let col = ((rel_x / px(col_w_f32)) as usize).min(col_count - 1);
+            let rel_y: Pixels = point.y - table_top;
+            let row = ((rel_y / px(TABLE_ROW_H)) as usize).min(rows.len());
+            Some((row, col))
+        } else {
+            None
+        }
+    }
+
     // ── Mouse ─────────────────────────────────────────────────────────────────
 
     /// Map a screen-space click position to the nearest document cursor position.
@@ -896,6 +1112,20 @@ impl EntityInputHandler for DocumentEditorState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        // When inside a table cell, report the cell text instead of paragraph text.
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let cell_text = self.table_cell_text(para_idx, tr, tc);
+                let start = utf16_to_char_offset_in_str(&cell_text, range_utf16.start);
+                let end = utf16_to_char_offset_in_str(&cell_text, range_utf16.end);
+                let ac_start = char_offset_to_utf16_in_str(&cell_text, start);
+                let ac_end = char_offset_to_utf16_in_str(&cell_text, end);
+                *actual_range = Some(ac_start..ac_end);
+                let result: String = cell_text.chars().skip(start).take(end.saturating_sub(start)).collect();
+                return Some(result);
+            }
+        }
         let start = self.utf16_to_char_offset_in_para(range_utf16.start);
         let end = self.utf16_to_char_offset_in_para(range_utf16.end);
         let actual_start = self.char_offset_to_utf16_in_para(start);
@@ -913,6 +1143,16 @@ impl EntityInputHandler for DocumentEditorState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        // When inside a table cell, report cursor position within cell text.
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let cell_text = self.table_cell_text(para_idx, tr, tc);
+                let off = self.cursor.char_offset.min(cell_text.chars().count());
+                let u16_off = char_offset_to_utf16_in_str(&cell_text, off);
+                return Some(UTF16Selection { range: u16_off..u16_off, reversed: false });
+            }
+        }
         let cursor_u16 = self.char_offset_to_utf16_in_para(self.cursor.char_offset);
         if let Some(sel) = &self.selection {
             let (start, end) = sel.ordered();
@@ -953,6 +1193,42 @@ impl EntityInputHandler for DocumentEditorState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ── Table cell: route input into the active cell ──────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                if !new_text.is_empty() {
+                    let offset = self.cursor.char_offset;
+                    if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                        let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                        let char_count = cell.chars().count();
+                        let safe_off = offset.min(char_count);
+                        // If range_utf16 specifies a delete range (e.g. IME replacement), apply it
+                        let (del_start_char, del_end_char) = if let Some(ref r) = range_utf16 {
+                            let s = utf16_to_char_offset_in_str(cell, r.start);
+                            let e = utf16_to_char_offset_in_str(cell, r.end);
+                            (s, e)
+                        } else {
+                            (safe_off, safe_off)
+                        };
+                        if del_start_char < del_end_char {
+                            let byte_s = cell.char_indices().nth(del_start_char).map(|(i,_)| i).unwrap_or(cell.len());
+                            let byte_e = cell.char_indices().nth(del_end_char).map(|(i,_)| i).unwrap_or(cell.len());
+                            cell.drain(byte_s..byte_e);
+                        }
+                        let insert_char_off = del_start_char.min(cell.chars().count());
+                        let byte_off = cell.char_indices().nth(insert_char_off).map(|(i,_)| i).unwrap_or(cell.len());
+                        cell.insert_str(byte_off, new_text);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                        self.cursor.char_offset = insert_char_off + new_text.chars().count();
+                    }
+                }
+                self.marked_range = None;
+                cx.notify();
+                return;
+            }
+        }
+        // ── Normal paragraph text ─────────────────────────────────────────────
         // Resolve the range to delete
         let range = range_utf16.map(|r| {
             let s = self.utf16_to_char_offset_in_para(r.start);
@@ -990,6 +1266,48 @@ impl EntityInputHandler for DocumentEditorState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ── Table cell: IME mark/replace in active cell ───────────────────────
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let offset = self.cursor.char_offset;
+                if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                    let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                    let char_count = cell.chars().count();
+                    let safe_off = offset.min(char_count);
+                    let (del_start, del_end) = if let Some(ref r) = range_utf16 {
+                        let s = utf16_to_char_offset_in_str(cell, r.start);
+                        let e = utf16_to_char_offset_in_str(cell, r.end);
+                        (s, e)
+                    } else {
+                        (safe_off, safe_off)
+                    };
+                    if del_start < del_end {
+                        let byte_s = cell.char_indices().nth(del_start).map(|(i,_)| i).unwrap_or(cell.len());
+                        let byte_e = cell.char_indices().nth(del_end).map(|(i,_)| i).unwrap_or(cell.len());
+                        cell.drain(byte_s..byte_e);
+                    }
+                    let insert_off = del_start.min(cell.chars().count());
+                    let byte_off = cell.char_indices().nth(insert_off).map(|(i,_)| i).unwrap_or(cell.len());
+                    let insert_byte_start = byte_off;
+                    if !new_text.is_empty() {
+                        cell.insert_str(byte_off, new_text);
+                        self.cursor.char_offset = insert_off + new_text.chars().count();
+                    }
+                    *source = gfm_rebuild_from_strings(headers, rows);
+                    let mark_byte_end = insert_byte_start + new_text.len();
+                    self.marked_range = Some(insert_byte_start..mark_byte_end);
+                    if let Some(r) = new_selected_range_utf16 {
+                        // best-effort: adjust cursor offset within new_text
+                        let adj = utf16_to_char_offset_in_str(new_text, r.end.saturating_sub(r.start));
+                        self.cursor.char_offset = insert_off + adj;
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
+        // ── Normal paragraph text ─────────────────────────────────────────────
         let range = range_utf16.map(|r| {
             let s = self.utf16_to_char_offset_in_para(r.start);
             let e = self.utf16_to_char_offset_in_para(r.end);
@@ -1066,6 +1384,35 @@ const LEFT_MARGIN: f32 = 48.0;
 const TOP_PADDING: f32 = 24.0;
 const PARA_GAP: f32 = 8.0;
 const MERMAID_HEIGHT: f32 = 180.0;
+const TABLE_ROW_H: f32 = 28.0;
+const TABLE_CELL_PAD_X: f32 = 8.0;
+const TABLE_CELL_PAD_Y: f32 = 5.0;
+
+/// Regenerate GFM markdown source from plain-string headers + rows.
+fn gfm_rebuild_from_strings(headers: &[String], rows: &[Vec<String>]) -> String {
+    let mut out = String::new();
+    out.push('|');
+    for h in headers { out.push(' '); out.push_str(h); out.push_str(" |"); }
+    out.push('\n');
+    out.push('|');
+    for _ in headers { out.push_str(" --- |"); }
+    out.push('\n');
+    for row in rows {
+        out.push('|');
+        for ci in 0..headers.len() {
+            let cell = row.get(ci).map(|s| s.as_str()).unwrap_or("");
+            out.push(' '); out.push_str(cell); out.push_str(" |");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Total pixel height for a table paragraph (header row + data rows + border).
+fn table_height(headers: &[String], rows: &[Vec<String>]) -> f32 {
+    let _ = headers;
+    TABLE_ROW_H * (1 + rows.len()) as f32 + 2.0
+}
 
 fn para_font_size(kind: &ParagraphKind) -> f32 {
     match kind {
@@ -1073,6 +1420,7 @@ fn para_font_size(kind: &ParagraphKind) -> f32 {
         ParagraphKind::Heading(2) => 21.0,
         ParagraphKind::Heading(3) => 18.0,
         ParagraphKind::CodeFence(_) => 13.0,
+        ParagraphKind::Table { .. } => 13.0,
         _ => 15.0,
     }
 }
@@ -1083,6 +1431,7 @@ fn para_line_height(kind: &ParagraphKind) -> f32 {
         ParagraphKind::Heading(2) => 32.0,
         ParagraphKind::Heading(3) => 28.0,
         ParagraphKind::CodeFence(_) => 20.0,
+        ParagraphKind::Table { .. } => TABLE_ROW_H,
         _ => 24.0,
     }
 }
@@ -1123,6 +1472,26 @@ fn coalesce_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
 fn bytes_to_chars(text: &str, byte_offset: usize) -> usize {
     let safe_offset = byte_offset.min(text.len());
     text[..safe_offset].chars().count()
+}
+
+/// Convert a UTF-16 code-unit offset to a Unicode char offset within `text`.
+fn utf16_to_char_offset_in_str(text: &str, utf16_off: usize) -> usize {
+    let mut u16_count = 0usize;
+    for (char_idx, ch) in text.chars().enumerate() {
+        if u16_count >= utf16_off { return char_idx; }
+        u16_count += ch.len_utf16();
+    }
+    text.chars().count()
+}
+
+/// Convert a Unicode char offset to a UTF-16 code-unit offset within `text`.
+fn char_offset_to_utf16_in_str(text: &str, char_off: usize) -> usize {
+    let mut u16_count = 0usize;
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= char_off { break; }
+        u16_count += ch.len_utf16();
+    }
+    u16_count
 }
 
 /// Given a click x-position (relative to the left margin) and the precomputed
@@ -1300,6 +1669,9 @@ impl Element for DocumentEditorElement {
                 ParagraphKind::Mermaid(_) => {
                     total_h += MERMAID_HEIGHT + PARA_GAP;
                 }
+                ParagraphKind::Table { headers, rows, .. } => {
+                    total_h += table_height(headers, rows) + PARA_GAP;
+                }
                 _ => {
                     // Count visual lines by counting '\n's in plain text
                     let text = para.plain_text();
@@ -1332,6 +1704,9 @@ impl Element for DocumentEditorElement {
             let lh = para_line_height(&para.kind);
             match &para.kind {
                 ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
+                ParagraphKind::Table { headers, rows, .. } => {
+                    total_h += table_height(headers, rows) + PARA_GAP;
+                }
                 _ => {
                     let text = para.plain_text();
                     let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
@@ -1380,9 +1755,9 @@ impl Element for DocumentEditorElement {
         let selection_color = theme.tokens.primary.opacity(0.22);
         let caret_color = theme.tokens.primary;
 
-        let (paragraphs, cursor, selection) = {
+        let (paragraphs, cursor, selection, table_cursor) = {
             let s = self.state.read(cx);
-            (s.paragraphs.clone(), s.cursor, s.selection)
+            (s.paragraphs.clone(), s.cursor, s.selection, s.table_cursor)
         };
 
         let mut current_y: f32 = TOP_PADDING;
@@ -1445,6 +1820,171 @@ impl Element for DocumentEditorElement {
                     });
                     line_layouts.push(None);
                     current_y += MERMAID_HEIGHT + PARA_GAP;
+                    continue;
+                }
+                ParagraphKind::Table { headers, rows, .. } => {
+                    let th = table_height(headers, rows);
+                    let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+                    let col_count = headers.len().max(1);
+                    // col_w_f32: raw f32 for arithmetic (Pixels/Pixels = f32)
+                    let col_w_f32: f32 = table_w / px(col_count as f32);
+                    let top_screen = bounds.top() + px(current_y);
+
+                    // Background
+                    let table_bounds = Bounds::new(
+                        point(left, top_screen),
+                        size(table_w, px(th)),
+                    );
+                    window.paint_quad(fill(table_bounds, theme.tokens.muted.opacity(0.08)));
+
+                    // Horizontal separator after header
+                    let sep_y = top_screen + px(TABLE_ROW_H);
+                    let sep = Bounds::new(
+                        point(left, sep_y),
+                        size(table_w, px(1.0)),
+                    );
+                    window.paint_quad(fill(sep, theme.tokens.border));
+
+                    // Outer border
+                    for (bx, by, bw, bh) in [
+                        (left, top_screen, table_w, px(1.0)),                        // top
+                        (left, top_screen + px(th - 1.0), table_w, px(1.0)),          // bottom
+                        (left, top_screen, px(1.0), px(th)),                           // left
+                        (left + table_w - px(1.0), top_screen, px(1.0), px(th)),       // right
+                    ] {
+                        window.paint_quad(fill(Bounds::new(point(bx, by), size(bw, bh)), theme.tokens.border));
+                    }
+
+                    // Vertical column separators
+                    for ci in 1..headers.len() {
+                        let cx_px = left + px(col_w_f32 * ci as f32);
+                        let vert = Bounds::new(point(cx_px, top_screen), size(px(1.0), px(th)));
+                        window.paint_quad(fill(vert, theme.tokens.border));
+                    }
+
+                    // Paint cell text
+                    let cell_font_size = px(13.0);
+                    let cell_lh = px(TABLE_ROW_H);
+
+                    let mut paint_cells = |cells: &[String], row_top: Pixels, bold: bool, window: &mut Window| {
+                        let mut header_font = base_font.clone();
+                        if bold { header_font.weight = gpui::FontWeight::BOLD; }
+                        for (ci, cell_text) in cells.iter().enumerate() {
+                            let cell_x = left + px(col_w_f32 * ci as f32 + TABLE_CELL_PAD_X);
+                            let cell_y = row_top + px(TABLE_CELL_PAD_Y);
+                            // Clip text to column width
+                            let max_chars = ((col_w_f32 - TABLE_CELL_PAD_X * 2.0) / 7.5).max(4.0) as usize;
+                            let display: String = cell_text.chars().take(max_chars.max(4)).collect();
+                            if display.is_empty() { continue; }
+                            let run = TextRun {
+                                len: display.len(),
+                                font: header_font.clone(),
+                                color: if bold { theme.tokens.foreground } else { theme.tokens.foreground },
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            let shaped = window.text_system().shape_line(
+                                display.clone().into(),
+                                cell_font_size,
+                                &[run],
+                                None,
+                            );
+                            let _ = shaped.paint(point(cell_x, cell_y), cell_lh, window, cx);
+                        }
+                    };
+
+                    // Header row (bold)
+                    paint_cells(headers, top_screen, true, window);
+                    // Data rows
+                    for (ri, row) in rows.iter().enumerate() {
+                        let row_top = top_screen + px(TABLE_ROW_H * (ri + 1) as f32);
+                        // Alternate row bg
+                        if ri % 2 == 1 {
+                            let row_bg = Bounds::new(
+                                point(left + px(1.0), row_top),
+                                size(table_w - px(2.0), px(TABLE_ROW_H)),
+                            );
+                            window.paint_quad(fill(row_bg, theme.tokens.muted.opacity(0.15)));
+                        }
+                        paint_cells(row, row_top, false, window);
+                    }
+
+                    // ── Active cell highlight + text cursor ─────────────────
+                    if let Some((tc_tr, tc_tc)) = table_cursor {
+                        if cursor.para_idx == para_idx && tc_tc < col_count {
+                            let cell_x = left + px(col_w_f32 * tc_tc as f32);
+                            let cell_y = top_screen + px(TABLE_ROW_H * tc_tr as f32);
+                            let cell_w = px(col_w_f32);
+                            let cell_h = px(TABLE_ROW_H);
+                            // Highlight fill
+                            window.paint_quad(fill(
+                                Bounds::new(point(cell_x, cell_y), size(cell_w, cell_h)),
+                                theme.tokens.primary.opacity(0.12),
+                            ));
+                            // Highlight border (4 sides)
+                            for (bx, by, bw, bh) in [
+                                (cell_x, cell_y, cell_w, px(1.5)),
+                                (cell_x, cell_y + cell_h - px(1.5), cell_w, px(1.5)),
+                                (cell_x, cell_y, px(1.5), cell_h),
+                                (cell_x + cell_w - px(1.5), cell_y, px(1.5), cell_h),
+                            ] {
+                                window.paint_quad(fill(Bounds::new(point(bx, by), size(bw, bh)), theme.tokens.primary));
+                            }
+                            // Text cursor caret inside the active cell
+                            if focus_handle.is_focused(window) {
+                                let cell_text: String = if tc_tr == 0 {
+                                    headers.get(tc_tc).cloned().unwrap_or_default()
+                                } else {
+                                    rows.get(tc_tr - 1).and_then(|r| r.get(tc_tc)).cloned().unwrap_or_default()
+                                };
+                                let caret_col = cursor.char_offset.min(cell_text.chars().count());
+                                let prefix: String = cell_text.chars().take(caret_col).collect();
+                                let prefix_w = if prefix.is_empty() {
+                                    px(0.0)
+                                } else {
+                                    let prefix_bytes = prefix.len();
+                                    let run = TextRun {
+                                        len: prefix_bytes,
+                                        font: base_font.clone(),
+                                        color: theme.tokens.foreground,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    };
+                                    let shaped = window.text_system().shape_line(
+                                        prefix.into(),
+                                        cell_font_size,
+                                        &[run],
+                                        None,
+                                    );
+                                    shaped.x_for_index(prefix_bytes)
+                                };
+                                let caret_x = cell_x + px(TABLE_CELL_PAD_X) + prefix_w;
+                                let caret_y2 = cell_y + px(TABLE_CELL_PAD_Y);
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(caret_x, caret_y2),
+                                        size(px(2.0), px(TABLE_ROW_H - TABLE_CELL_PAD_Y * 2.0)),
+                                    ),
+                                    caret_color,
+                                ));
+                            }
+                        }
+                    }
+
+                    visual_lines.push(VisualLine {
+                        para_idx,
+                        char_start: 0,
+                        char_end: 0,
+                        top_px: current_y,
+                        height_px: th,
+                        font_size_px,
+                        is_mermaid: false,
+                        glyph_xs: vec![],
+                    });
+                    line_layouts.push(None);
+                    current_y += th + PARA_GAP;
                     continue;
                 }
                 _ => {}
@@ -1613,6 +2153,8 @@ impl Element for DocumentEditorElement {
             });
 
             if let Some((vl_idx, vl)) = cur_vl {
+                // Tables draw their own cell caret in the table paint block above.
+                if !matches!(&paragraphs[vl.para_idx].kind, ParagraphKind::Table { .. }) {
                 let col = cursor.char_offset - vl.char_start;
                 let cursor_x = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
                     let vl_text: String = paragraphs[vl.para_idx].plain_text()
@@ -1631,6 +2173,7 @@ impl Element for DocumentEditorElement {
                     ),
                     caret_color,
                 ));
+                } // end table guard
             }
         }
     }
@@ -1700,9 +2243,16 @@ impl RenderOnce for DocumentEditor {
             .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
                 let bounds = state.read(cx).last_bounds.unwrap_or_default();
                 let new_cursor = state.read(cx).cursor_from_point(event.position, bounds);
+                let new_table_cell = state.read(cx).table_cell_from_point(event.position, bounds);
                 let focus = state.read(cx).focus_handle.clone();
                 state.update(cx, |s, cx| {
                     s.cursor = new_cursor;
+                    s.table_cursor = new_table_cell;
+                    // When clicking into a table cell, position char_offset at end of cell text
+                    if let Some((tr, tc)) = new_table_cell {
+                        let cell_len = s.table_cell_text(s.cursor.para_idx, tr, tc).chars().count();
+                        s.cursor.char_offset = cell_len;
+                    }
                     // Do not clear selection here. A plain click will clear it on mouse up;
                     // a drag will set drag_occurred=true and keep the selection.
                     s.drag_anchor = Some(new_cursor);

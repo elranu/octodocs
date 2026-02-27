@@ -29,6 +29,13 @@ pub enum ParagraphKind {
     /// A Mermaid diagram island. The path is the cached PNG (may be empty
     /// until the render task completes). The source is stored in spans[0].
     Mermaid(PathBuf),
+    /// A GFM table. `source` is the raw markdown for round-trip serialization.
+    /// `headers` and `rows` are plain-text cell contents for WYSIWYG display.
+    Table {
+        source: String,
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
 }
 
 /// A run of text with a single inline format.
@@ -134,6 +141,55 @@ impl InlineSpan {
 // RenderNode → DocParagraph conversion
 // ─────────────────────────────────────────────────────────────
 
+fn inlines_to_plain_text(inlines: &[Inline]) -> String {
+    let mut s = String::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(t) | Inline::Bold(t) | Inline::Italic(t)
+            | Inline::Underline(t) | Inline::Strikethrough(t)
+            | Inline::Code(t) => s.push_str(t),
+            Inline::Link { text, .. } => s.push_str(text),
+            Inline::Image { alt, .. } => s.push_str(alt),
+            Inline::SoftBreak => s.push(' '),
+            Inline::HardBreak => s.push('\n'),
+        }
+    }
+    s
+}
+
+fn table_to_gfm_markdown(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    let col_count = headers.len().max(1);
+    let mut md = String::new();
+    // Header row
+    md.push('|');
+    for cell in headers {
+        md.push(' ');
+        md.push_str(&inlines_to_plain_text(cell));
+        md.push_str(" |");
+    }
+    md.push('\n');
+    // Separator row
+    md.push('|');
+    for _ in 0..col_count {
+        md.push_str(" --- |");
+    }
+    md.push('\n');
+    // Data rows
+    for row in rows {
+        md.push('|');
+        for i in 0..col_count {
+            let cell_text = row.get(i)
+                .map(|cell| inlines_to_plain_text(cell))
+                .unwrap_or_default();
+            md.push(' ');
+            md.push_str(&cell_text);
+            md.push_str(" |");
+        }
+        md.push('\n');
+    }
+    md
+}
+
 fn inlines_to_spans(inlines: &[Inline]) -> Vec<InlineSpan> {
     let mut spans: Vec<InlineSpan> = Vec::new();
     for inline in inlines {
@@ -218,6 +274,18 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
                 .collect()
         }
         RenderNode::ThematicBreak => vec![],
+        RenderNode::Table { headers, rows } => {
+            let source = table_to_gfm_markdown(headers, rows);
+            let header_texts: Vec<String> = headers.iter().map(|c| inlines_to_plain_text(c)).collect();
+            let row_texts: Vec<Vec<String>> = rows
+                .iter()
+                .map(|row| row.iter().map(|c| inlines_to_plain_text(c)).collect())
+                .collect();
+            vec![DocParagraph {
+                kind: ParagraphKind::Table { source, headers: header_texts, rows: row_texts },
+                spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+            }]
+        }
     }
 }
 
@@ -328,6 +396,7 @@ pub fn doc_paragraphs_to_markdown(paragraphs: &[DocParagraph]) -> String {
                 let src = para.plain_text();
                 format!("```mermaid\n{}\n```", src)
             }
+            ParagraphKind::Table { source, .. } => source.clone(),
         };
         parts.push(block);
     }

@@ -16,7 +16,7 @@ use super::repo_add_modal::RepoAddModal;
 use crate::app_state::{AppState, PostAuthAction};
 
 pub struct RootView {
-    app_state: Entity<AppState>,
+    pub app_state: Entity<AppState>,
     document_editor_pane: Entity<DocumentEditorPane>,
     editor_pane: Entity<EditorPane>,
     preview_pane: Entity<PreviewPane>,
@@ -155,6 +155,34 @@ impl RootView {
             });
         };
 
+        let aw = app_weak.clone();
+        let insert_table_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.insert_table(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let add_row_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.add_table_row(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let remove_row_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.remove_table_row(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let add_col_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.add_table_column(cx));
+            });
+        };
+
         let is_dark = Rc::new(Cell::new(initial_is_dark));
         let is_dark_toggle = is_dark.clone();
         let theme_h = move |_w: &mut Window, cx: &mut App| {
@@ -251,6 +279,26 @@ impl RootView {
                                 .tooltip("Inline Code")
                                 .on_click(code_h),
                         )
+                        .button(
+                            ToolbarButton::new("table", IconSource::Named("table".into()))
+                                .tooltip("Insert Table")
+                                .on_click(insert_table_h),
+                        )
+                        .button(
+                            ToolbarButton::new("row-add", IconSource::Named("row-add".into()))
+                                .tooltip("Add Row (Tab at end)")
+                                .on_click(add_row_h),
+                        )
+                        .button(
+                            ToolbarButton::new("col-add", IconSource::Named("col-add".into()))
+                                .tooltip("Add Column")
+                                .on_click(add_col_h),
+                        )
+                        .button(
+                            ToolbarButton::new("row-remove", IconSource::Named("x".into()))
+                                .tooltip("Remove Row")
+                                .on_click(remove_row_h),
+                        )
                         .separator()
                         .button(
                             ToolbarButton::new("theme", IconSource::Named("moon".into()))
@@ -317,6 +365,7 @@ impl Render for RootView {
         let repo_add_modal_open = app.repo_add_modal_open;
         let sidebar_open = app.sidebar_open;
         let show_unsaved_prompt = app.show_unsaved_prompt;
+        let pending_window_close = app.pending_window_close;
         let github_sync_status = app.github_sync_status.clone();
         let github_sync_configured = !app.github_bindings.is_empty();
         let current_doc_path = app.document.path.clone();
@@ -541,6 +590,7 @@ impl Render for RootView {
             let _ = app_weak_prompt_cancel_backdrop.update(cx, |state, cx| {
                 state.pending_open_path = None;
                 state.show_unsaved_prompt = false;
+                state.pending_window_close = false;
                 cx.notify();
             });
         };
@@ -565,7 +615,11 @@ impl Render for RootView {
             .content(
                 div()
                     .p(px(16.0))
-                    .child(body("You have unsaved changes. Save before opening?")),
+                    .child(body(if pending_window_close {
+                        "You have unsaved changes. Save before closing?"
+                    } else {
+                        "You have unsaved changes. Save before opening?"
+                    })),
             )
             .footer(
                 div()
@@ -582,6 +636,7 @@ impl Render for RootView {
                                 let _ = app_weak_prompt_cancel_btn.update(cx, |state, cx| {
                                     state.pending_open_path = None;
                                     state.show_unsaved_prompt = false;
+                                    state.pending_window_close = false;
                                     cx.notify();
                                 });
                             }),
@@ -592,14 +647,19 @@ impl Render for RootView {
                             .on_click(move |_, _w, cx| {
                                 let _ = app_weak_prompt_discard_btn.update(cx, |state, cx| {
                                     state.dirty = false;
-                                    if let Some(path) = state.pending_open_path.take() {
-                                        match FileIo::open(&path) {
-                                            Ok(doc) => state.load_document(doc, cx),
-                                            Err(err) => eprintln!("Open error: {err}"),
-                                        }
-                                    }
                                     state.show_unsaved_prompt = false;
-                                    cx.notify();
+                                    if state.pending_window_close {
+                                        state.pending_window_close = false;
+                                        cx.quit();
+                                    } else {
+                                        if let Some(path) = state.pending_open_path.take() {
+                                            match FileIo::open(&path) {
+                                                Ok(doc) => state.load_document(doc, cx),
+                                                Err(err) => eprintln!("Open error: {err}"),
+                                            }
+                                        }
+                                        cx.notify();
+                                    }
                                 });
                             }),
                     )
@@ -608,17 +668,25 @@ impl Render for RootView {
                             .variant(ButtonVariant::Default)
                             .on_click(move |_, _w, cx| {
                                 let _ = app_weak_prompt_save_btn.update(cx, |state, cx| {
-                                    state.save_as(cx);
+                                    state.save(cx);
                                     if !state.dirty {
-                                        if let Some(path) = state.pending_open_path.take() {
-                                            match FileIo::open(&path) {
-                                                Ok(doc) => state.load_document(doc, cx),
-                                                Err(err) => eprintln!("Open error: {err}"),
+                                        if state.pending_window_close {
+                                            state.pending_window_close = false;
+                                            state.show_unsaved_prompt = false;
+                                            cx.quit();
+                                        } else {
+                                            if let Some(path) = state.pending_open_path.take() {
+                                                match FileIo::open(&path) {
+                                                    Ok(doc) => state.load_document(doc, cx),
+                                                    Err(err) => eprintln!("Open error: {err}"),
+                                                }
                                             }
+                                            state.show_unsaved_prompt = false;
+                                            cx.notify();
                                         }
-                                        state.show_unsaved_prompt = false;
+                                    } else {
+                                        cx.notify();
                                     }
-                                    cx.notify();
                                 });
                             }),
                     ),

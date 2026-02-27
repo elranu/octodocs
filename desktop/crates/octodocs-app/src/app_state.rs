@@ -79,6 +79,9 @@ pub struct AppState {
     pub pending_open_path: Option<PathBuf>,
     /// Whether to show unsaved-change confirmation before opening sidebar file.
     pub show_unsaved_prompt: bool,
+    /// Set when the user clicked the window close button with unsaved changes.
+    /// The in-app modal will quit the app after Save/Discard when this is true.
+    pub pending_window_close: bool,
     /// Action to perform after authentication succeeds.
     pub pending_post_auth_action: Option<PostAuthAction>,
     _import_summary_version: u64,
@@ -86,6 +89,9 @@ pub struct AppState {
     _summary_task: Option<Task<()>>,
     _doc_editor_subscription: Subscription,
     _full_content_subscription: Subscription,
+    /// Counts how many pending editor notifications were triggered by load_document
+    /// (not by the user). Observers skip marking dirty while this is > 0.
+    loading_doc: usize,
 }
 
 impl AppState {
@@ -218,6 +224,11 @@ impl AppState {
 
         // When the full editor changes (Source/Split mode), sync document + blocks.
         let full_subscription = cx.observe(&full_editor_state, |this, _, cx| {
+            // Skip if this notification came from load_document, not from the user.
+            if this.loading_doc > 0 {
+                this.loading_doc -= 1;
+                return;
+            }
             if this.view_mode != ViewMode::Wysiwyg {
                 let content = this.full_editor_state.read(cx).content();
                 this.blocks = Renderer::parse_blocks(&content);
@@ -229,6 +240,11 @@ impl AppState {
 
         // When the doc_editor changes (WYSIWYG mode), sync markdown back to document.
         let doc_editor_sub = cx.observe(&doc_editor, |this, _, cx| {
+            // Skip if this notification came from load_document, not from the user.
+            if this.loading_doc > 0 {
+                this.loading_doc -= 1;
+                return;
+            }
             if this.view_mode == ViewMode::Wysiwyg {
                 let markdown = this.doc_editor.read(cx).to_markdown();
                 this.document.content = markdown;
@@ -281,7 +297,10 @@ impl AppState {
             active_binding_idx,
             pending_open_path: None,
             show_unsaved_prompt: false,
+            pending_window_close: false,
             pending_post_auth_action: None,
+            // One pending notification from the startup doc_editor.update() above.
+            loading_doc: 1,
             _import_summary_version: 0,
             _sync_task: None,
             _summary_task: None,
@@ -361,8 +380,12 @@ impl AppState {
         self.active_binding_idx = None;
         self.pending_open_path = None;
         self.show_unsaved_prompt = false;
+        self.pending_window_close = false;
         self.pending_post_auth_action = None;
+        self.loading_doc = 0; // reset any stale counter before incrementing
+        self.loading_doc += 1;
         self.doc_editor.update(cx, |editor, cx| editor.load_document(vec![], cx));
+        self.loading_doc += 1;
         self.full_editor_state.update(cx, |state, cx| state.set_content("", cx));
         cx.notify();
     }
@@ -381,7 +404,8 @@ impl AppState {
     }
 
     pub fn open_file_from_sidebar(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
-        if self.document.path.as_ref() == Some(&path) || !self.dirty {
+        // Clicking the already-open file: just reload from disk.
+        if self.document.path.as_ref() == Some(&path) {
             match octodocs_core::FileIo::open(&path) {
                 Ok(doc) => self.load_document(doc, cx),
                 Err(err) => eprintln!("Open error: {err}"),
@@ -389,8 +413,8 @@ impl AppState {
             return;
         }
 
-        if self.document.path.is_some() {
-            self.save(cx);
+        // No unsaved changes: open directly.
+        if !self.dirty {
             match octodocs_core::FileIo::open(&path) {
                 Ok(doc) => self.load_document(doc, cx),
                 Err(err) => eprintln!("Open error: {err}"),
@@ -398,6 +422,7 @@ impl AppState {
             return;
         }
 
+        // Dirty document (with or without a saved path): always ask.
         self.pending_open_path = Some(path);
         self.show_unsaved_prompt = true;
         cx.notify();
@@ -408,10 +433,13 @@ impl AppState {
         let content = doc.content.clone();
         self.blocks = Renderer::parse_blocks(&content);
         // Populate the word-style editor with the new content.
+        // Increment loading_doc so the observer doesn't mark dirty for these notifications.
         let paragraphs = markdown_to_doc_paragraphs(&content);
+        self.loading_doc += 1;
         self.doc_editor.update(cx, |editor, cx| editor.load_document(paragraphs, cx));
         // If currently in Source/Split, populate the full editor too.
         if self.view_mode != ViewMode::Wysiwyg {
+            self.loading_doc += 1;
             let c = content.clone();
             self.full_editor_state.update(cx, |state, cx| state.set_content(&c, cx));
         }

@@ -40,6 +40,12 @@ pub enum RenderNode {
     ThematicBreak,
     BlockQuote(Vec<RenderNode>),
     List { ordered: bool, items: Vec<Vec<RenderNode>> },
+    /// A GFM table. `headers` is the header row; `rows` are the body rows.
+    /// Each cell is a list of `Inline` nodes (may have bold/italic etc.).
+    Table {
+        headers: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +146,12 @@ impl Renderer {
         let mut italic = false;
         let mut strikethrough = false;
         let mut underline = false;
+        // Table state
+        let mut in_table_cell = false;
+        let mut table_headers: Vec<Vec<Inline>> = Vec::new();
+        let mut table_rows: Vec<Vec<Vec<Inline>>> = Vec::new();
+        let mut table_current_row: Vec<Vec<Inline>> = Vec::new();
+        let mut table_cell_buf: Vec<Inline> = Vec::new();
 
         for event in parser {
             match event {
@@ -155,6 +167,45 @@ impl Renderer {
                             text: heading_text.clone(),
                         });
                     }
+                }
+
+                // ── Tables ───────────────────────────────────────
+                Event::Start(Tag::Table(_)) => {
+                    in_table_cell = false;
+                    table_headers.clear();
+                    table_rows.clear();
+                    table_current_row.clear();
+                    table_cell_buf.clear();
+                }
+                Event::End(TagEnd::Table) => {
+                    nodes.push(RenderNode::Table {
+                        headers: table_headers.clone(),
+                        rows: table_rows.clone(),
+                    });
+                    table_headers.clear();
+                    table_rows.clear();
+                }
+                Event::Start(Tag::TableHead) => {
+                    table_current_row.clear();
+                }
+                Event::End(TagEnd::TableHead) => {
+                    table_headers = table_current_row.clone();
+                    table_current_row.clear();
+                }
+                Event::Start(Tag::TableRow) => { table_current_row.clear(); }
+                Event::End(TagEnd::TableRow) => {
+                    table_rows.push(table_current_row.clone());
+                    table_current_row.clear();
+                }
+                Event::Start(Tag::TableCell) => {
+                    in_table_cell = true;
+                    table_cell_buf.clear();
+                    bold = false; italic = false; strikethrough = false; underline = false;
+                }
+                Event::End(TagEnd::TableCell) => {
+                    in_table_cell = false;
+                    table_current_row.push(table_cell_buf.clone());
+                    table_cell_buf.clear();
                 }
 
                 // ── Paragraphs ────────────────────────────────────
@@ -222,6 +273,17 @@ impl Renderer {
                     let s = text.into_string();
                     if in_code_block {
                         code_buf.push_str(&s);
+                    } else if in_table_cell {
+                        let inline = if bold {
+                            Inline::Bold(s)
+                        } else if italic {
+                            Inline::Italic(s)
+                        } else if strikethrough {
+                            Inline::Strikethrough(s)
+                        } else {
+                            Inline::Text(s)
+                        };
+                        table_cell_buf.push(inline);
                     } else if in_heading.is_some() {
                         heading_text.push_str(&s);
                     } else if in_paragraph {
@@ -415,6 +477,24 @@ mod tests {
             );
         } else {
             panic!("expected paragraph");
+        }
+    }
+
+    #[test]
+    fn parses_gfm_table() {
+        let md = "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |\n";
+        let tree = Renderer::parse(md);
+        if let RenderNode::Table { headers, rows } = &tree.0[0] {
+            // Two header cells
+            assert_eq!(headers.len(), 2, "expected 2 header columns");
+            let h0: String = headers[0].iter().filter_map(|i| if let Inline::Text(t) = i { Some(t.clone()) } else { None }).collect();
+            assert_eq!(h0, "Name");
+            // Two data rows
+            assert_eq!(rows.len(), 2, "expected 2 data rows");
+            let r0c1: String = rows[0][1].iter().filter_map(|i| if let Inline::Text(t) = i { Some(t.clone()) } else { None }).collect();
+            assert_eq!(r0c1, "30");
+        } else {
+            panic!("expected RenderNode::Table, got: {:?}", tree.0);
         }
     }
 }

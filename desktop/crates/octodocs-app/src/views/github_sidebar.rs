@@ -286,6 +286,7 @@ impl GithubSidebar {
         depth: usize,
         rows: &mut Vec<AnyElement>,
         weak: &gpui::WeakEntity<Self>,
+        current_doc_path: Option<&Path>,
     ) {
         let theme = use_theme();
         for entry in self.list_entries(dir) {
@@ -334,7 +335,7 @@ impl GithubSidebar {
                 );
 
                 if expanded {
-                    self.push_tree_rows(&entry.path, depth + 1, rows, weak);
+                    self.push_tree_rows(&entry.path, depth + 1, rows, weak, current_doc_path);
                 }
             } else {
                 let path = entry.path.clone();
@@ -345,7 +346,9 @@ impl GithubSidebar {
                 let path_for_right = path.clone();
                 let indent = depth as f32 * 12.0;
                 let is_renaming = self.rename_target.as_ref() == Some(&path);
-                let is_selected = self.selected_file.as_ref() == Some(&path);
+                // Highlight when this row is the sidebar selection OR the currently open document.
+                let is_active = current_doc_path == Some(path.as_path());
+                let is_selected = is_active || self.selected_file.as_deref() == Some(path.as_path());
 
                 if is_renaming {
                     let rename_weak = weak.clone();
@@ -385,7 +388,12 @@ impl GithubSidebar {
                             .py(px(4.0))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.tokens.accent))
-                            .when(is_selected, |s| s.bg(theme.tokens.accent.opacity(0.35)))
+                            .when(is_selected && !is_active, |s| s.bg(theme.tokens.accent.opacity(0.5)))
+                            .when(is_active, |s| {
+                                s.bg(theme.tokens.accent)
+                                    .border_l_2()
+                                    .border_color(theme.tokens.primary)
+                            })
                             .rounded(px(6.0))
                             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                 let _ = row_weak.update(cx, |sidebar, cx| {
@@ -660,7 +668,10 @@ impl Render for GithubSidebar {
                 let _ = std::fs::create_dir_all(&local_root);
             }
             let mut rows = Vec::new();
-            self.push_tree_rows(&local_root, 0, &mut rows, &weak);
+            // Pass the currently-open document path so every render cycle the active
+            // file is highlighted regardless of how it was opened.
+            let current_doc_path = self.app_state.read(cx).document.path.clone();
+            self.push_tree_rows(&local_root, 0, &mut rows, &weak, current_doc_path.as_deref());
 
             let current_folder = self
                 .focused_dir
