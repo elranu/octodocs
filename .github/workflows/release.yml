@@ -116,11 +116,18 @@ jobs:
             -ov -format UDZO \
             octodocs-macos-aarch64.dmg
 
-      - name: Upload artifact
+      - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: octodocs-macos-aarch64.dmg
           path: desktop/octodocs-macos-aarch64.dmg
+          if-no-files-found: error
+
+      - name: Upload raw binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octodocs-macos-aarch64
+          path: desktop/target/release/octodocs-app
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +167,13 @@ jobs:
           path: desktop/octodocs-windows-x86_64.zip
           if-no-files-found: error
 
+      - name: Upload raw .exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octodocs-windows-x86_64.exe
+          path: desktop/target/release/octodocs-app.exe
+          if-no-files-found: error
+
   # ─────────────────────────────────────────────────────────────────────────────
   # GitHub Release (requires Linux; macOS & Windows are optional extras)
   # ─────────────────────────────────────────────────────────────────────────────
@@ -185,7 +199,7 @@ jobs:
           mv dist/octodocs-app dist/octodocs-linux-x86_64
           chmod +x dist/octodocs-linux-x86_64
 
-      - name: Download macOS artifact (optional)
+      - name: Download macOS DMG (optional)
         if: needs.build-macos.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -193,13 +207,42 @@ jobs:
           name: octodocs-macos-aarch64.dmg
           path: dist/
 
-      - name: Download Windows artifact (optional)
+      - name: Download macOS binary (optional)
+        if: needs.build-macos.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: octodocs-macos-aarch64
+          path: dist/
+
+      - name: Rename macOS binary
+        run: |
+          if [ -f dist/octodocs-app ]; then
+            mv dist/octodocs-app dist/octodocs-macos-aarch64
+            chmod +x dist/octodocs-macos-aarch64
+          fi
+
+      - name: Download Windows ZIP (optional)
         if: needs.build-windows.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: octodocs-windows-x86_64.zip
           path: dist/
+
+      - name: Download Windows .exe (optional)
+        if: needs.build-windows.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: octodocs-windows-x86_64.exe
+          path: dist/
+
+      - name: Rename Windows binary
+        run: |
+          if [ -f dist/octodocs-app.exe ]; then
+            mv dist/octodocs-app.exe dist/octodocs-windows-x86_64.exe
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -217,11 +260,14 @@ jobs:
             Prefer the `.tar.gz` if you want the full archive.
 
             ### macOS (Apple Silicon)
-            Download `octodocs-macos-aarch64.dmg`, open it, and drag **OctoDocs** to `/Applications`.
+            - **Easy install:** `octodocs-macos-aarch64` — raw binary, `chmod +x` and run directly.
+            - **Full installer:** `octodocs-macos-aarch64.dmg` — open and drag **OctoDocs** to `/Applications`.
             > **Note:** The app is unsigned. Right-click → **Open** on first launch, or:
             > System Settings → Privacy & Security → **Open Anyway**
 
             ### Windows (x86_64)
+            - **Easy install:** `octodocs-windows-x86_64.exe` — download and run directly.
+            - **Archive:** `octodocs-windows-x86_64.zip` — extract and run `octodocs-app.exe`.
             > **Note:** The binary is unsigned. Windows SmartScreen will warn you.
             > Click **"More info" → "Run anyway"** to launch.
 
@@ -230,5 +276,7 @@ jobs:
           files: |
             dist/octodocs-linux-x86_64
             dist/octodocs-linux-x86_64.tar.gz
+            dist/octodocs-macos-aarch64
             dist/octodocs-macos-aarch64.dmg
+            dist/octodocs-windows-x86_64.exe
             dist/octodocs-windows-x86_64.zip

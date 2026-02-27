@@ -49,13 +49,15 @@ Installs to `~/.local/octodocs/` and symlinks `octodocs` into `~/.local/bin`. Or
 
 #### macOS (Apple Silicon)
 
-Download `octodocs-macos-aarch64.dmg` from the [Releases page](https://github.com/elranu/octodocs/releases), open it, and drag **OctoDocs** to `/Applications`.
+- **Binary:** download `octodocs-macos-aarch64` from the [Releases page](https://github.com/elranu/octodocs/releases), `chmod +x octodocs-macos-aarch64` and run.
+- **Installer:** download `octodocs-macos-aarch64.dmg`, open it, and drag **OctoDocs** to `/Applications`.
 
 > **Note:** The app is unsigned. On first launch, right-click → **Open**, or go to System Settings → Privacy & Security → **Open Anyway**.
 
 #### Windows (x86_64)
 
-Download `octodocs-windows-x86_64.zip` from the [Releases page](https://github.com/elranu/octodocs/releases), extract it, and run `octodocs-app.exe`.
+- **Executable:** download `octodocs-windows-x86_64.exe` from the [Releases page](https://github.com/elranu/octodocs/releases) and run it directly.
+- **Archive:** download `octodocs-windows-x86_64.zip`, extract it, and run `octodocs-app.exe`.
 
 > **Note:** The binary is unsigned. Windows SmartScreen will show a warning. Click **"More info" → "Run anyway"**.
 
