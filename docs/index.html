@@ -3,18 +3,891 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OctoDocs — Write. Save. Synced to GitHub.</title>
-  <meta name="description" content="A native desktop Markdown editor that automatically backs up everything to a GitHub repository. No terminal. No git. Just write." />
-  <meta property="og:title" content="OctoDocs" />
-  <meta property="og:description" content="Write. Save. Synced to GitHub." />
+  <title>OctoDocs — Write. Save. GitHub handles the rest.</title>
+  <meta name="description" content="Free native desktop Markdown editor that auto-syncs your notes and documents to GitHub on every save. No terminal. No Git knowledge needed." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta property="og:title" content="OctoDocs — Write. Save. GitHub handles the rest." />
+  <meta property="og:description" content="Free native desktop editor that auto-syncs your notes and documents to GitHub on every save. No Git knowledge needed." />
   <meta property="og:image" content="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocsFull.svg" />
   <link rel="icon" href="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --navy:     #072D56;
-      --blue:     #3C9ADA;
+      --bg:         #02080f;
+      --bg2:        #040d18;
+      --bg3:        #071525;
+      --surface:    rgba(255,255,255,0.04);
+      --surface2:   rgba(255,255,255,0.07);
+      --border:     rgba(255,255,255,0.08);
+      --border-b:   rgba(70,145,220,0.28);
+      --blue:       #4A9FE8;
+      --blue-lt:    #93C5F8;
+      --blue-dim:   rgba(74,159,232,0.15);
+      --purple:     #8B7CEA;
+      --purple-dim: rgba(139,124,234,0.12);
+      --green:      #3DD68C;
+      --green-dim:  rgba(61,214,140,0.12);
+      --orange:     #FB923C;
+      --yellow:     #FCD34D;
+      --text:       #EDF2F7;
+      --muted:      #5A7490;
+      --muted2:     #8FA4BE;
+      --radius:     16px;
+      --radius-sm:  10px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "DM Sans", -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    /* ─── TYPOGRAPHY ──────────────────────── */
+    h1, h2, h3, h4 {
+      font-family: "Bricolage Grotesque", sans-serif;
+      letter-spacing: -.025em;
+      line-height: 1.1;
+    }
+    code { font-family: "JetBrains Mono", "Fira Code", monospace; }
+
+    /* ─── UTILS ───────────────────────────── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 clamp(1.25rem, 4vw, 3rem); }
+    .tag {
+      display: inline-flex; align-items: center; gap: .38rem;
+      font-size: .72rem; font-weight: 600; letter-spacing: .1em;
+      text-transform: uppercase; border-radius: 100px;
+      padding: .28rem .85rem;
+    }
+    .tag-blue  { background: var(--blue-dim);  color: var(--blue-lt); border: 1px solid rgba(74,159,232,.25); }
+    .tag-green { background: var(--green-dim); color: var(--green);   border: 1px solid rgba(61,214,140,.2); }
+    .section-eyebrow {
+      font-size: .72rem; font-weight: 700; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--blue); margin-bottom: .55rem;
+    }
+    .section-h { font-size: clamp(1.75rem, 3.5vw, 2.6rem); font-weight: 800; }
+    .section-p {
+      color: var(--muted2); margin-top: .75rem;
+      font-size: clamp(.94rem, 2vw, 1.05rem); max-width: 520px; line-height: 1.7;
+    }
+
+    /* ─── BUTTONS ─────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: .5rem;
+      border-radius: 10px; font-size: .92rem; font-weight: 600;
+      padding: .62rem 1.35rem; text-decoration: none; border: none;
+      cursor: pointer; transition: all .18s ease; white-space: nowrap;
+      font-family: "DM Sans", sans-serif;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn-primary {
+      background: var(--blue); color: #fff;
+      box-shadow: 0 4px 24px rgba(74,159,232,.35);
+    }
+    .btn-primary:hover { background: #5BAFF5; box-shadow: 0 6px 32px rgba(74,159,232,.5); }
+    .btn-hero {
+      font-size: 1.05rem; padding: .85rem 2rem; border-radius: 12px;
+      background: var(--blue); color: #fff;
+      box-shadow: 0 6px 40px rgba(74,159,232,.45), 0 0 0 1px rgba(74,159,232,.3);
+      font-family: "Bricolage Grotesque", sans-serif; font-weight: 700; letter-spacing: -.01em;
+    }
+    .btn-hero:hover { background: #5BAFF5; box-shadow: 0 8px 50px rgba(74,159,232,.6); transform: translateY(-2px); }
+    .btn-outline {
+      background: transparent; color: var(--blue-lt);
+      border: 1px solid rgba(74,159,232,.35);
+    }
+    .btn-outline:hover { background: var(--blue-dim); border-color: rgba(74,159,232,.6); }
+    .btn-ghost {
+      background: var(--surface); color: var(--muted2);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { background: var(--surface2); color: var(--text); }
+    .btn-sm  { font-size: .82rem; padding: .42rem .95rem; border-radius: 8px; }
+    .btn-lg  { font-size: 1rem; padding: .78rem 1.6rem; border-radius: 12px; }
+    .btn-github {
+      background: rgba(255,255,255,.07); color: var(--text);
+      border: 1px solid var(--border);
+      font-family: "Bricolage Grotesque", sans-serif; font-weight: 600;
+      font-size: 1.02rem; padding: .85rem 1.75rem; border-radius: 12px;
+    }
+    .btn-github:hover { background: rgba(255,255,255,.12); transform: translateY(-2px); }
+    .btn-sponsor {
+      background: linear-gradient(135deg, #ea4aaa 0%, #f96eba 100%);
+      color: #fff; box-shadow: 0 4px 24px rgba(234,74,170,.3);
+    }
+    .btn-sponsor:hover { box-shadow: 0 6px 32px rgba(234,74,170,.5); }
+
+    /* ─── NAV ─────────────────────────────── */
+    nav {
+      position: sticky; top: 0; z-index: 200;
+      height: 62px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 clamp(1.25rem, 4vw, 3rem);
+      background: rgba(2,8,15,0.82);
+      backdrop-filter: blur(20px) saturate(1.5);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      display: flex; align-items: center; gap: .6rem;
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 700; font-size: 1.12rem; color: var(--text);
+      text-decoration: none; letter-spacing: -.02em;
+    }
+    .nav-logo img { height: 26px; }
+    .nav-center { display: flex; align-items: center; gap: 2rem; }
+    .nav-center a { color: var(--muted2); text-decoration: none; font-size: .88rem; font-weight: 500; transition: color .15s; }
+    .nav-center a:hover { color: var(--text); }
+    .nav-right { display: flex; align-items: center; gap: .6rem; }
+    .gh-star-btn {
+      display: inline-flex; align-items: center; gap: .45rem;
+      padding: .45rem 1rem; border-radius: 8px;
+      background: rgba(255,255,255,.05); border: 1px solid var(--border);
+      color: var(--muted2); font-size: .82rem; font-weight: 500;
+      text-decoration: none; transition: all .15s;
+    }
+    .gh-star-btn:hover { background: rgba(255,255,255,.1); color: var(--text); }
+    .gh-logo { width: 15px; height: 15px; fill: currentColor; flex-shrink: 0; }
+
+    /* ─── HERO ────────────────────────────── */
+    .hero {
+      position: relative;
+      display: flex; flex-direction: column; align-items: center;
+      text-align: center;
+      padding: clamp(5rem, 10vw, 9rem) clamp(1.25rem, 4vw, 3rem) 0;
+      overflow: hidden;
+    }
+    .hero-glow {
+      position: absolute; inset: 0; pointer-events: none; z-index: 0;
+    }
+    .hero-glow::before {
+      content: "";
+      position: absolute; top: -10%; left: 50%; transform: translateX(-50%);
+      width: 900px; height: 560px;
+      background: radial-gradient(ellipse at 50% 0%, rgba(74,159,232,.18) 0%, rgba(139,124,234,.07) 45%, transparent 72%);
+    }
+    .hero-glow::after {
+      content: "";
+      position: absolute; top: 20%; left: 28%;
+      width: 340px; height: 340px;
+      background: radial-gradient(ellipse, rgba(139,124,234,.09) 0%, transparent 70%);
+    }
+    .hero > * { position: relative; z-index: 1; }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: .5rem;
+      padding: .32rem 1rem; border-radius: 100px;
+      background: rgba(74,159,232,.1); border: 1px solid rgba(74,159,232,.25);
+      font-size: .75rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--blue-lt); margin-bottom: 2rem;
+      animation: fadeIn .5s ease;
+    }
+    .hero-badge .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 6px var(--green);
+      animation: blink 2s ease-in-out infinite;
+    }
+    @keyframes blink  { 0%,100%{opacity:1} 50%{opacity:.35} }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(18px)} to{opacity:1;transform:none} }
+    .hero h1 {
+      font-size: clamp(2.6rem, 6.5vw, 5rem);
+      font-weight: 800; max-width: 860px;
+      line-height: 1.07; letter-spacing: -.03em;
+      animation: fadeUp .6s ease .1s both;
+    }
+    .hero h1 .grad {
+      background: linear-gradient(135deg, #FFFFFF 0%, #93C5F8 55%, #8B7CEA 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .hero-sub {
+      margin-top: 1.5rem;
+      font-size: clamp(1rem, 2.4vw, 1.22rem);
+      color: var(--muted2); max-width: 600px; line-height: 1.7;
+      animation: fadeUp .6s ease .2s both;
+    }
+    .hero-actions {
+      display: flex; flex-wrap: wrap; gap: .85rem; justify-content: center;
+      margin-top: 2.6rem; animation: fadeUp .6s ease .3s both;
+    }
+    .hero-trust {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 1.4rem;
+      justify-content: center; margin-top: 2rem;
+      color: var(--muted); font-size: .8rem;
+      animation: fadeUp .6s ease .4s both;
+    }
+    .hero-trust span { display: flex; align-items: center; gap: .35rem; }
+
+    /* App mockup window */
+    .app-window {
+      position: relative; margin-top: 3.5rem;
+      width: min(960px, 94vw);
+      border-radius: 16px 16px 0 0;
+      background: #08172a;
+      border: 1px solid rgba(255,255,255,.1); border-bottom: none;
+      box-shadow: 0 -4px 80px rgba(74,159,232,.15), 0 0 0 1px rgba(74,159,232,.08), inset 0 1px 0 rgba(255,255,255,.06);
+      overflow: hidden; animation: fadeUp .8s ease .4s both;
+    }
+    .app-window::before {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(180deg, transparent 60%, var(--bg) 100%);
+      pointer-events: none; z-index: 10;
+    }
+    .window-bar {
+      display: flex; align-items: center; gap: .75rem;
+      padding: .85rem 1.2rem;
+      background: rgba(255,255,255,.03); border-bottom: 1px solid rgba(255,255,255,.07);
+    }
+    .traffic { display: flex; gap: .45rem; }
+    .traffic span { width: 12px; height: 12px; border-radius: 50%; }
+    .traffic span:nth-child(1) { background: #FF5F57; }
+    .traffic span:nth-child(2) { background: #FEBC2E; }
+    .traffic span:nth-child(3) { background: #28C840; }
+    .window-title { flex: 1; text-align: center; font-size: .78rem; color: var(--muted); }
+    .sync-badge {
+      display: flex; align-items: center; gap: .3rem;
+      font-size: .72rem; color: var(--green); font-family: "JetBrains Mono", monospace;
+      background: rgba(61,214,140,.1); border: 1px solid rgba(61,214,140,.18);
+      padding: .2rem .6rem; border-radius: 100px;
+    }
+    .sync-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+    .window-body { display: grid; grid-template-columns: 220px 1fr; }
+    .win-sidebar {
+      background: rgba(0,0,0,.25); border-right: 1px solid rgba(255,255,255,.06);
+      padding: .85rem 0; min-height: 420px;
+    }
+    .win-sidebar-title {
+      font-size: .66rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+      color: var(--muted); padding: 0 1rem .6rem;
+    }
+    .win-file {
+      display: flex; align-items: center; gap: .5rem; padding: .42rem 1rem;
+      font-size: .8rem; color: var(--muted2); cursor: default;
+    }
+    .win-file.active { background: rgba(74,159,232,.1); color: var(--text); border-right: 2px solid var(--blue); }
+    .win-file .icon { font-size: .78rem; opacity: .7; }
+    .win-editor { padding: 2rem 2.5rem; }
+    .win-h1 { font-family: "Bricolage Grotesque", sans-serif; font-size: 1.55rem; font-weight: 700; color: var(--text); margin-bottom: .6rem; letter-spacing: -.02em; }
+    .win-meta { font-size: .78rem; color: var(--muted); margin-bottom: 1.4rem; }
+    .win-h2 { font-family: "Bricolage Grotesque", sans-serif; font-size: 1.05rem; font-weight: 700; color: var(--text); margin: 1.3rem 0 .5rem; letter-spacing: -.015em; }
+    .win-p { font-size: .88rem; color: var(--muted2); line-height: 1.7; margin-bottom: .5rem; }
+    .win-bold { font-weight: 600; color: var(--text); }
+    .win-checklist { list-style: none; margin-bottom: 1.2rem; }
+    .win-checklist li { font-size: .85rem; color: var(--muted2); padding: .2rem 0; display: flex; align-items: center; gap: .5rem; }
+    .win-checklist li .chk { width: 15px; height: 15px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: .6rem; flex-shrink: 0; }
+    .chk-done { background: rgba(61,214,140,.2); color: var(--green); border: 1px solid rgba(61,214,140,.3); }
+    .chk-todo { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); }
+    .win-mermaid {
+      background: rgba(139,124,234,.08); border: 1px solid rgba(139,124,234,.18);
+      border-radius: 8px; padding: .75rem 1rem;
+      font-size: .78rem; font-family: "JetBrains Mono", monospace; color: #b4aff8; margin-top: .5rem;
+    }
+    .win-mermaid .mml { color: var(--muted); font-size: .68rem; margin-bottom: .3rem; }
+
+    /* ─── TRUST STRIP ─────────────────────── */
+    .strip {
+      border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,.02);
+      padding: 1.8rem clamp(1.25rem, 4vw, 3rem);
+    }
+    .strip-inner {
+      max-width: 1100px; margin: 0 auto;
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2.5rem;
+    }
+    .strip-item { display: flex; align-items: center; gap: .65rem; font-size: .88rem; color: var(--muted2); }
+    .strip-item .si { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: .95rem; }
+    .strip-item strong { color: var(--text); font-weight: 600; }
+
+    /* ─── PROBLEM / SOLUTION ─────────────── */
+    .problem { padding: clamp(4rem, 8vw, 7rem) clamp(1.25rem, 4vw, 3rem); background: var(--bg2); }
+    .problem-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5rem; align-items: start; max-width: 1100px; margin: 0 auto; }
+    .pain-list, .solution-list { display: flex; flex-direction: column; gap: 1.1rem; margin-top: 2rem; }
+    .pain-item, .solution-item {
+      display: flex; gap: .85rem; align-items: flex-start;
+      padding: 1.1rem 1.2rem; border-radius: var(--radius-sm);
+    }
+    .pain-item { background: rgba(242,63,67,.05); border: 1px solid rgba(242,63,67,.1); }
+    .solution-item { background: rgba(61,214,140,.05); border: 1px solid rgba(61,214,140,.12); }
+    .picon { font-size: 1.1rem; flex-shrink: 0; margin-top: .08rem; }
+    .pain-item h4, .solution-item h4 { font-size: .92rem; font-weight: 700; color: var(--text); margin-bottom: .2rem; }
+    .pain-item p, .solution-item p { font-size: .83rem; color: var(--muted2); line-height: 1.6; }
+
+    /* ─── FEATURES ────────────────────────── */
+    .features { padding: clamp(4rem, 8vw, 7rem) clamp(1.25rem, 4vw, 3rem); }
+    .features-head { max-width: 1100px; margin: 0 auto 3rem; }
+    .features-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 1.1rem; max-width: 1100px; margin: 0 auto; }
+    .feat-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.6rem 1.5rem;
+      transition: border-color .2s, box-shadow .2s, transform .2s;
+    }
+    .feat-card:hover { border-color: var(--border-b); box-shadow: 0 4px 30px rgba(74,159,232,.08); transform: translateY(-3px); }
+    .feat-icon { width: 42px; height: 42px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; margin-bottom: 1.1rem; }
+    .feat-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: .4rem; }
+    .feat-card p { font-size: .87rem; color: var(--muted2); line-height: 1.6; }
+
+    /* ─── HOW IT WORKS ────────────────────── */
+    .how { padding: clamp(4rem, 8vw, 7rem) clamp(1.25rem, 4vw, 3rem); background: var(--bg2); }
+    .how-inner { max-width: 1100px; margin: 0 auto; }
+    .steps-row {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem;
+      margin-top: 3rem; position: relative;
+    }
+    .steps-row::before {
+      content: ""; position: absolute; top: 18px;
+      left: calc(12.5% + 18px); right: calc(12.5% + 18px);
+      height: 1px; background: linear-gradient(90deg, transparent, var(--border-b), transparent); z-index: 0;
+    }
+    .step-item { text-align: center; position: relative; z-index: 1; }
+    .step-num {
+      width: 38px; height: 38px; border-radius: 50%;
+      background: var(--bg3); border: 1px solid var(--border-b);
+      display: flex; align-items: center; justify-content: center;
+      font-size: .82rem; font-weight: 800; color: var(--blue);
+      margin: 0 auto 1rem; font-family: "Bricolage Grotesque", sans-serif;
+      box-shadow: 0 0 16px rgba(74,159,232,.12);
+    }
+    .step-item h3 { font-size: .95rem; font-weight: 700; margin-bottom: .4rem; }
+    .step-item p { font-size: .84rem; color: var(--muted2); }
+
+    /* ─── AUDIENCES ───────────────────────── */
+    .audiences { padding: clamp(4rem, 8vw, 7rem) clamp(1.25rem, 4vw, 3rem); }
+    .aud-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 1100px; margin: 2.5rem auto 0; }
+    .aud-card { border-radius: var(--radius); padding: 2rem 1.8rem; position: relative; overflow: hidden; }
+    .aud-card-dev   { background: linear-gradient(135deg, rgba(74,159,232,.1) 0%, rgba(139,124,234,.08) 100%); border: 1px solid rgba(74,159,232,.2); }
+    .aud-card-writer{ background: linear-gradient(135deg, rgba(61,214,140,.07) 0%, rgba(251,146,60,.05) 100%); border: 1px solid rgba(61,214,140,.18); }
+    .aud-label { font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin-bottom: .8rem; display: block; }
+    .aud-card-dev .aud-label { color: var(--blue-lt); }
+    .aud-card-writer .aud-label { color: var(--green); }
+    .aud-card h3 { font-size: 1.35rem; font-weight: 800; margin-bottom: .65rem; }
+    .aud-card p { font-size: .9rem; color: var(--muted2); line-height: 1.65; margin-bottom: 1.2rem; }
+    .aud-bullets { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+    .aud-bullets li { display: flex; align-items: center; gap: .55rem; font-size: .86rem; color: var(--muted2); }
+    .aud-bullets li::before { content: "›"; font-size: 1.1rem; font-weight: 700; flex-shrink: 0; }
+    .aud-card-dev .aud-bullets li::before { color: var(--blue); }
+    .aud-card-writer .aud-bullets li::before { color: var(--green); }
+
+    /* ─── DOWNLOAD ────────────────────────── */
+    .download {
+      padding: clamp(5rem, 9vw, 8rem) clamp(1.25rem, 4vw, 3rem); background: var(--bg2);
+      position: relative; overflow: hidden;
+    }
+    .download::before {
+      content: ""; position: absolute; top: -100px; left: 50%; transform: translateX(-50%);
+      width: 700px; height: 350px;
+      background: radial-gradient(ellipse, rgba(74,159,232,.07) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .download-head { max-width: 1100px; margin: 0 auto 3rem; }
+    .os-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.1rem; max-width: 1100px; margin: 0 auto; }
+    .os-card {
+      background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1.8rem 1.7rem; display: flex; flex-direction: column; gap: 1.1rem;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .os-card:hover { border-color: var(--border-b); box-shadow: 0 4px 30px rgba(74,159,232,.07); }
+    .os-header { display: flex; align-items: center; gap: .9rem; }
+    .os-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; }
+    .os-name { font-family: "Bricolage Grotesque", sans-serif; font-size: 1.1rem; font-weight: 700; letter-spacing: -.015em; }
+    .os-arch { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
+    .os-desc { font-size: .85rem; color: var(--muted2); line-height: 1.6; }
+    .code-box {
+      background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.07); border-radius: 9px;
+      padding: .75rem 1rem; font-family: "JetBrains Mono", monospace; font-size: .77rem;
+      color: var(--blue-lt); overflow-x: auto; white-space: nowrap; line-height: 1.5;
+    }
+    .warn-box {
+      font-size: .78rem; color: var(--muted2); padding: .65rem .9rem;
+      background: rgba(254,200,29,.05); border-left: 2px solid rgba(254,200,29,.4);
+      border-radius: 4px; line-height: 1.5;
+    }
+    .warn-box strong { color: var(--text); }
+    .os-btns { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: auto; }
+    .os-btns .btn { flex: 1; justify-content: center; }
+    .bfs-card {
+      max-width: 1100px; margin: 1.5rem auto 0;
+      background: rgba(255,255,255,.02); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1.6rem 1.8rem;
+    }
+    .bfs-card h3 { font-size: .95rem; font-weight: 700; margin-bottom: .7rem; }
+    .bfs-card p { font-size: .84rem; color: var(--muted2); margin-bottom: .85rem; line-height: 1.6; }
+    .bfs-card p a { color: var(--blue); text-decoration: none; }
+    .bfs-card p a:hover { text-decoration: underline; }
+
+    /* ─── FINAL CTA ───────────────────────── */
+    .cta-section {
+      padding: clamp(5rem, 9vw, 8rem) clamp(1.25rem, 4vw, 3rem);
+      text-align: center; position: relative; overflow: hidden;
+    }
+    .cta-section::before {
+      content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 600px; height: 360px;
+      background: radial-gradient(ellipse, rgba(74,159,232,.1) 0%, rgba(139,124,234,.05) 50%, transparent 75%);
+      pointer-events: none;
+    }
+    .cta-inner { max-width: 640px; margin: 0 auto; position: relative; }
+    .cta-section h2 { font-size: clamp(2rem, 4.5vw, 3.2rem); font-weight: 800; letter-spacing: -.03em; }
+    .cta-section h2 .grad, .hero h1 .grad {
+      background: linear-gradient(135deg, #FFFFFF 0%, #93C5F8 60%, #8B7CEA 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .cta-section > .cta-inner > p { color: var(--muted2); margin-top: 1rem; font-size: 1.05rem; line-height: 1.7; }
+    .cta-actions { display: flex; flex-wrap: wrap; gap: .85rem; justify-content: center; margin-top: 2.5rem; }
+
+    /* ─── SPONSOR ─────────────────────────── */
+    .sponsor { padding: clamp(4rem, 7vw, 6rem) clamp(1.25rem, 4vw, 3rem); background: var(--bg2); text-align: center; }
+    .sponsor-inner { max-width: 700px; margin: 0 auto; }
+    .sponsor-inner p { color: var(--muted2); margin-top: .8rem; line-height: 1.7; }
+    .sponsor-actions { display: flex; flex-wrap: wrap; gap: .85rem; justify-content: center; margin-top: 2.2rem; }
+
+    /* ─── FOOTER ──────────────────────────── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2.2rem clamp(1.25rem, 4vw, 3rem);
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1.2rem;
+    }
+    .footer-left { display: flex; align-items: center; gap: .7rem; }
+    .footer-left img { height: 20px; }
+    .footer-left span { font-size: .82rem; color: var(--muted); }
+    .footer-right { display: flex; flex-wrap: wrap; gap: 1.4rem; }
+    .footer-right a { color: var(--muted); font-size: .82rem; text-decoration: none; transition: color .15s; }
+    .footer-right a:hover { color: var(--text); }
+
+    /* ─── RESPONSIVE ──────────────────────── */
+    @media (max-width: 780px) {
+      .problem-grid { grid-template-columns: 1fr; gap: 3rem; }
+      .steps-row { grid-template-columns: 1fr 1fr; }
+      .steps-row::before { display: none; }
+      .aud-grid { grid-template-columns: 1fr; }
+      .window-body { grid-template-columns: 155px 1fr; }
+      .nav-center { display: none; }
+    }
+    @media (max-width: 520px) {
+      .win-sidebar { display: none; }
+      .window-body { grid-template-columns: 1fr; }
+      .steps-row { grid-template-columns: 1fr; }
+      .hero-trust { gap: .85rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── NAV ──────────────────────────────────────────── -->
+<nav>
+  <a href="#" class="nav-logo">
+    <img src="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" alt="OctoDocs" />
+    OctoDocs
+  </a>
+  <div class="nav-center">
+    <a href="#features">Features</a>
+    <a href="#download">Download</a>
+    <a href="https://github.com/elranu/octodocs" target="_blank" rel="noopener">GitHub</a>
+    <a href="#sponsor">Sponsor</a>
+  </div>
+  <div class="nav-right">
+    <a href="https://github.com/elranu/octodocs" class="gh-star-btn" target="_blank" rel="noopener">
+      <svg class="gh-logo" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.67 7.67 0 018 4.07c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      View on GitHub
+    </a>
+    <a href="#download" class="btn btn-primary btn-sm">↓ Download Free</a>
+  </div>
+</nav>
+
+<!-- ── HERO ─────────────────────────────────────────── -->
+<header class="hero">
+  <div class="hero-glow" aria-hidden="true"></div>
+
+  <div class="hero-badge">
+    <span class="dot"></span>
+    Free &amp; Open Source · Native Desktop App
+  </div>
+
+  <h1>
+    <span class="grad">Your notes, documents,<br>and ideas — always<br>backed up to GitHub.</span>
+  </h1>
+
+  <p class="hero-sub">
+    OctoDocs is a free native desktop Markdown editor that <strong style="color:var(--text)">automatically pushes to GitHub every time you save.</strong> No terminal. No Git commands. No merge conflicts. Just write.
+  </p>
+
+  <div class="hero-actions">
+    <a href="#download" class="btn btn-hero">↓&ensp;Download for Free</a>
+    <a href="https://github.com/elranu/octodocs" class="btn btn-github" target="_blank" rel="noopener">
+      <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.67 7.67 0 018 4.07c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      View on GitHub
+    </a>
+  </div>
+
+  <div class="hero-trust">
+    <span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+      Free forever
+    </span>
+    <span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+      MIT licensed, open source
+    </span>
+    <span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+      No account required to try
+    </span>
+    <span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+      Linux · macOS · Windows
+    </span>
+  </div>
+
+  <!-- App window mockup -->
+  <div class="app-window" role="img" aria-label="OctoDocs editor interface">
+    <div class="window-bar">
+      <div class="traffic"><span></span><span></span><span></span></div>
+      <span class="window-title">Project Notes.md — OctoDocs</span>
+      <span class="sync-badge">Synced to GitHub</span>
+    </div>
+    <div class="window-body">
+      <div class="win-sidebar">
+        <div class="win-sidebar-title">Documents</div>
+        <div class="win-file active"><span class="icon">📄</span> Project Notes.md</div>
+        <div class="win-file"><span class="icon">📄</span> Meeting Notes.md</div>
+        <div class="win-file"><span class="icon">📄</span> Architecture.md</div>
+        <div class="win-file"><span class="icon">📄</span> Ideas.md</div>
+        <div class="win-file"><span class="icon">📁</span> archive/</div>
+      </div>
+      <div class="win-editor">
+        <div class="win-h1">Q1 Project Planning</div>
+        <div class="win-meta">Last saved 2 seconds ago · Pushed to github.com/you/notes</div>
+        <div class="win-p"><span class="win-bold">Goal:</span> Ship the new onboarding flow before end of March. Keep the team aligned.</div>
+        <div class="win-h2">✅ Action Items</div>
+        <ul class="win-checklist">
+          <li><span class="chk chk-done">✓</span> Finalize design mockups</li>
+          <li><span class="chk chk-done">✓</span> Set up staging environment</li>
+          <li><span class="chk chk-todo"></span> Write integration tests</li>
+          <li><span class="chk chk-todo"></span> Schedule user interviews</li>
+        </ul>
+        <div class="win-mermaid">
+          <div class="mml">Mermaid diagram — rendered inline</div>
+          graph TD · A[Write] →|Ctrl+S| B[GitHub] · B → C[Version History]
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ── TRUST STRIP ───────────────────────────────────── -->
+<div class="strip">
+  <div class="strip-inner">
+    <div class="strip-item">
+      <div class="si" style="background:rgba(74,159,232,.12);">🛡️</div>
+      <div><strong>Your data, your GitHub.</strong> Documents live in your own repo — no third-party servers.</div>
+    </div>
+    <div class="strip-item">
+      <div class="si" style="background:rgba(61,214,140,.1);">⚡</div>
+      <div><strong>Native Rust performance.</strong> Launches instantly. Uses minimal RAM.</div>
+    </div>
+    <div class="strip-item">
+      <div class="si" style="background:rgba(251,146,60,.1);">📜</div>
+      <div><strong>Infinite version history.</strong> Every save is a commit. Roll back anything, anytime.</div>
+    </div>
+    <div class="strip-item">
+      <div class="si" style="background:rgba(139,124,234,.12);">🔓</div>
+      <div><strong>Zero lock-in.</strong> Files are plain <code>.md</code> — open them with any text editor.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── PROBLEM / SOLUTION ────────────────────────────── -->
+<section class="problem" id="why">
+  <div class="problem-grid">
+    <div>
+      <p class="section-eyebrow">Sound familiar?</p>
+      <h2 class="section-h">The pain of losing your work</h2>
+      <div class="pain-list">
+        <div class="pain-item">
+          <span class="picon">💾</span>
+          <div>
+            <h4>Hard drive died. Notes gone.</h4>
+            <p>Hundreds of hours of writing, meeting notes, and ideas — vanished. No backup, no recovery.</p>
+          </div>
+        </div>
+        <div class="pain-item">
+          <span class="picon">🕰️</span>
+          <div>
+            <h4>Can't find the old version.</h4>
+            <p>"I had the right wording last Tuesday… but I overwrote it." Without history, it's just gone.</p>
+          </div>
+        </div>
+        <div class="pain-item">
+          <span class="picon">🗂️</span>
+          <div>
+            <h4>Notes scattered everywhere.</h4>
+            <p>One file in Notion, another in Google Docs, some in Apple Notes — you never know which is current.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <p class="section-eyebrow">The OctoDocs way</p>
+      <h2 class="section-h">Safe, versioned, always accessible</h2>
+      <div class="solution-list">
+        <div class="solution-item">
+          <span class="picon">🔁</span>
+          <div>
+            <h4>Ctrl+S backs up to GitHub.</h4>
+            <p>Every save creates a commit. Your work is in GitHub — accessible from any device, permanent, and secure.</p>
+          </div>
+        </div>
+        <div class="solution-item">
+          <span class="picon">🕵️</span>
+          <div>
+            <h4>Full version history, automatically.</h4>
+            <p>GitHub's diff view shows what changed and when. Recover any version from any point in time.</p>
+          </div>
+        </div>
+        <div class="solution-item">
+          <span class="picon">📁</span>
+          <div>
+            <h4>One place. On your machine.</h4>
+            <p>All your Markdown files in a local folder that syncs to GitHub. Open with OctoDocs or any editor you like.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FEATURES ──────────────────────────────────────── -->
+<section class="features" id="features">
+  <div class="features-head">
+    <p class="section-eyebrow">Features</p>
+    <h2 class="section-h">Everything you need. Nothing you don't.</h2>
+    <p class="section-p">Built for people who just want to write — and for developers who want their notes living in the same GitHub ecosystem as their code.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(74,159,232,.13);">✍️</div>
+      <h3>WYSIWYG Markdown Editor</h3>
+      <p>Write like in Google Docs — headings, bold, italic, underline, code, and strikethrough rendered live as you type. No raw <code>**asterisks**</code> visible unless you want them.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(61,214,140,.12);">☁️</div>
+      <h3>Auto-push on Every Save</h3>
+      <p>Hit Ctrl+S and OctoDocs saves locally <em>and</em> commits to your GitHub repo in the background. A status badge confirms the sync. Set it and forget it.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(251,146,60,.12);">📂</div>
+      <h3>File Explorer Sidebar</h3>
+      <p>Browse, create, rename, and organize your Markdown files in a sidebar file tree. All changes reflect immediately on GitHub.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(252,211,77,.12);">🔷</div>
+      <h3>Mermaid Diagrams, Inline</h3>
+      <p>Write Mermaid flowcharts and sequence diagrams in code blocks and see them rendered in full color — right inside the document. No Node.js, no browser.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(139,124,234,.12);">🔗</div>
+      <h3>Multiple Repositories</h3>
+      <p>Connect multiple GitHub repos — personal notes, team wiki, project docs. Each maps to a different repo, branch, and folder.</p>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(74,159,232,.12);">⚡</div>
+      <h3>Ready in 60 Seconds</h3>
+      <p>First launch walks you through GitHub OAuth in a browser. No terminal, no SSH keys, no config files. Pick a repo and start writing.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOR EVERYONE ──────────────────────────────────── -->
+<section class="audiences">
+  <div class="container" style="text-align:center;">
+    <p class="section-eyebrow">Built for everyone</p>
+    <h2 class="section-h" style="max-width:600px; margin:0 auto;">Whether you code or not,<br>OctoDocs just works</h2>
+  </div>
+  <div class="aud-grid">
+    <div class="aud-card aud-card-writer">
+      <span class="aud-label">For writers, note-takers &amp; teams</span>
+      <h3>No tech skills required</h3>
+      <p>OctoDocs handles the Git part invisibly. You write, press Save, and your documents are permanently backed up and versioned — without ever seeing a terminal or knowing what a commit is.</p>
+      <ul class="aud-bullets">
+        <li>Meeting notes that are always recoverable</li>
+        <li>Personal journals with full edit history</li>
+        <li>Team wikis that sync to GitHub automatically</li>
+        <li>Research, recipes, travel logs — all safe</li>
+      </ul>
+    </div>
+    <div class="aud-card aud-card-dev">
+      <span class="aud-label">For developers &amp; engineers</span>
+      <h3>Your notes where your code lives</h3>
+      <p>Keep Architecture Decision Records, runbooks, and notes in the same GitHub repo as your codebase. Every save is a real Git commit with a timestamp and full diff.</p>
+      <ul class="aud-bullets">
+        <li>Architecture Decision Records, auto-committed</li>
+        <li>Mermaid diagrams rendered inline — no browser</li>
+        <li>Source / WYSIWYG / Split editing modes</li>
+        <li>Multi-repo: dev notes, personal notes, team wiki</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ──────────────────────────────────── -->
+<section class="how" id="how">
+  <div class="how-inner">
+    <p class="section-eyebrow">How it works</p>
+    <h2 class="section-h">From download to writing in four steps</h2>
+    <div class="steps-row">
+      <div class="step-item">
+        <div class="step-num">1</div>
+        <h3>Download &amp; open</h3>
+        <p>Get the binary for your OS below and run it. No installer wizard, no dependencies.</p>
+      </div>
+      <div class="step-item">
+        <div class="step-num">2</div>
+        <h3>Connect GitHub</h3>
+        <p>Approve the app in your browser via GitHub OAuth. No passwords, no SSH keys, no terminal.</p>
+      </div>
+      <div class="step-item">
+        <div class="step-num">3</div>
+        <h3>Pick a repo &amp; folder</h3>
+        <p>Choose where your documents live. Existing <code>.md</code> files are imported automatically.</p>
+      </div>
+      <div class="step-item">
+        <div class="step-num">4</div>
+        <h3>Write &amp; save</h3>
+        <p>Ctrl+S saves locally and pushes to GitHub. A status badge confirms the sync.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DOWNLOAD ──────────────────────────────────────── -->
+<section class="download" id="download">
+  <div class="download-head">
+    <p class="section-eyebrow">Download</p>
+    <h2 class="section-h">Get OctoDocs — it's free</h2>
+    <p class="section-p">Pre-built native binaries for all platforms. Linux is production-ready. macOS and Windows are experimental and improving with each release.</p>
+  </div>
+
+  <div class="os-grid">
+    <!-- Linux -->
+    <div class="os-card">
+      <div class="os-header">
+        <div class="os-icon" style="background:rgba(251,146,60,.12);">🐧</div>
+        <div>
+          <div class="os-name">Linux</div>
+          <div class="os-arch">x86_64 · Recommended</div>
+        </div>
+        <span class="tag tag-green" style="margin-left:auto;">Stable</span>
+      </div>
+      <div class="code-box">curl -fsSL https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh</div>
+      <p class="os-desc">One command installs to <code style="color:var(--blue-lt)">~/.local/octodocs/</code> and symlinks <code style="color:var(--blue-lt)">octodocs</code> to your PATH automatically.</p>
+      <div class="os-btns">
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-linux-x86_64" class="btn btn-primary">↓ Download binary</a>
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-linux-x86_64.tar.gz" class="btn btn-ghost btn-sm">.tar.gz</a>
+      </div>
+    </div>
+
+    <!-- macOS -->
+    <div class="os-card">
+      <div class="os-header">
+        <div class="os-icon" style="background:rgba(74,159,232,.12);">🍎</div>
+        <div>
+          <div class="os-name">macOS</div>
+          <div class="os-arch">Apple Silicon · aarch64</div>
+        </div>
+        <span class="tag tag-blue" style="margin-left:auto;">Experimental</span>
+      </div>
+      <p class="os-desc">Native Metal renderer. Download the binary or the DMG installer.</p>
+      <div class="warn-box">
+        <strong>Unsigned app.</strong> On first launch: right-click → <strong>Open</strong>, or System Settings → Privacy &amp; Security → <strong>Open Anyway</strong>.
+      </div>
+      <div class="os-btns">
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-macos-aarch64" class="btn btn-primary">↓ Download binary</a>
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-macos-aarch64.dmg" class="btn btn-ghost btn-sm">.dmg</a>
+      </div>
+    </div>
+
+    <!-- Windows -->
+    <div class="os-card">
+      <div class="os-header">
+        <div class="os-icon" style="background:rgba(61,214,140,.1);">🪟</div>
+        <div>
+          <div class="os-name">Windows</div>
+          <div class="os-arch">x86_64</div>
+        </div>
+        <span class="tag tag-blue" style="margin-left:auto;">Experimental</span>
+      </div>
+      <p class="os-desc">Download the <code style="color:var(--blue-lt)">.exe</code> directly or grab the <code style="color:var(--blue-lt)">.zip</code> archive.</p>
+      <div class="warn-box">
+        <strong>Unsigned binary.</strong> SmartScreen may warn you — click <strong>"More info" → "Run anyway"</strong> to proceed.
+      </div>
+      <div class="os-btns">
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-windows-x86_64.exe" class="btn btn-primary">↓ Download .exe</a>
+        <a href="https://github.com/elranu/octodocs/releases/latest/download/octodocs-windows-x86_64.zip" class="btn btn-ghost btn-sm">.zip</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Build from source -->
+  <div class="bfs-card">
+    <h3>🔧 Build from Source</h3>
+    <p>Requires <a href="https://rustup.rs/" target="_blank" rel="noopener">Rust</a> nightly (selected automatically via <code>rust-toolchain.toml</code>). Linux also needs: <code style="color:var(--blue-lt);font-size:.8rem">libxcb1-dev libxkbcommon-dev libwayland-dev libvulkan-dev libsecret-1-dev libfontconfig-dev libasound2-dev libssl-dev</code></p>
+    <div class="code-box">git clone https://github.com/elranu/octodocs.git &amp;&amp; cd octodocs/desktop &amp;&amp; cargo run -p octodocs-app</div>
+  </div>
+</section>
+
+<!-- ── FINAL CTA ─────────────────────────────────────── -->
+<section class="cta-section">
+  <div class="cta-inner">
+    <h2>Stop losing your work.<br><span class="grad">Start writing with a safety net.</span></h2>
+    <p>OctoDocs is free, open source, and takes 60 seconds to set up. Every document you write is automatically committed to GitHub — forever.</p>
+    <div class="cta-actions">
+      <a href="#download" class="btn btn-hero">↓&ensp;Download Free Now</a>
+      <a href="https://github.com/elranu/octodocs" class="btn btn-github" target="_blank" rel="noopener">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.67 7.67 0 018 4.07c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        ⭐ Star on GitHub
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ── SPONSOR ───────────────────────────────────────── -->
+<section class="sponsor" id="sponsor">
+  <div class="sponsor-inner">
+    <p class="section-eyebrow">Support the project</p>
+    <h2 class="section-h">Help keep OctoDocs free</h2>
+    <p>OctoDocs is built and maintained in spare time — free to use, free to modify, MIT licensed. If it saves you time or protects your work, consider sponsoring development. Sponsors get to vote on which features ship next and help keep this independent of ads and VC money.</p>
+    <div class="sponsor-actions">
+      <a href="https://github.com/sponsors/elranu" class="btn btn-lg btn-sponsor" target="_blank" rel="noopener">♥&ensp;Sponsor on GitHub</a>
+      <a href="https://github.com/elranu/octodocs" class="btn btn-lg btn-ghost" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.67 7.67 0 018 4.07c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Browse Source Code
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ────────────────────────────────────────── -->
+<footer>
+  <div class="footer-left">
+    <img src="https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" alt="OctoDocs" />
+    <span>© 2025 OctoDocs · MIT License · Built with Rust</span>
+  </div>
+  <div class="footer-right">
+    <a href="https://github.com/elranu/octodocs" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/elranu/octodocs/releases" target="_blank" rel="noopener">Releases</a>
+    <a href="https://github.com/elranu/octodocs/issues" target="_blank" rel="noopener">Report a Bug</a>
+    <a href="https://github.com/sponsors/elranu" target="_blank" rel="noopener">Sponsor</a>
+    <a href="#download">Download</a>
+  </div>
+</footer>
+
+</body>
+</html>
       --blue-lt:  #8BC9F1;
       --blue-dk:  #247EBD;
       --red:      #F23F43;
