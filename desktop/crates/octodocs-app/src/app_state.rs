@@ -86,6 +86,7 @@ pub struct AppState {
     pub pending_post_auth_action: Option<PostAuthAction>,
     _import_summary_version: u64,
     _sync_task: Option<Task<()>>,
+    _pull_task: Option<Task<()>>,
     _summary_task: Option<Task<()>>,
     _doc_editor_subscription: Subscription,
     _full_content_subscription: Subscription,
@@ -217,7 +218,7 @@ impl AppState {
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let doc_editor = cx.new(|cx| DocumentEditorState::new(cx));
+        let doc_editor = cx.new(DocumentEditorState::new);
         let full_editor_state = cx.new(|cx| {
             adabraka_ui::components::editor::EditorState::new(cx)
         });
@@ -303,6 +304,7 @@ impl AppState {
             loading_doc: 1,
             _import_summary_version: 0,
             _sync_task: None,
+            _pull_task: None,
             _summary_task: None,
             _doc_editor_subscription: doc_editor_sub,
             _full_content_subscription: full_subscription,
@@ -404,28 +406,83 @@ impl AppState {
     }
 
     pub fn open_file_from_sidebar(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
-        // Clicking the already-open file: just reload from disk.
-        if self.document.path.as_ref() == Some(&path) {
-            match octodocs_core::FileIo::open(&path) {
-                Ok(doc) => self.load_document(doc, cx),
-                Err(err) => eprintln!("Open error: {err}"),
-            }
+        // Dirty document: ask before discarding changes.
+        if self.dirty {
+            self.pending_open_path = Some(path);
+            self.show_unsaved_prompt = true;
+            cx.notify();
             return;
         }
 
-        // No unsaved changes: open directly.
-        if !self.dirty {
-            match octodocs_core::FileIo::open(&path) {
-                Ok(doc) => self.load_document(doc, cx),
-                Err(err) => eprintln!("Open error: {err}"),
-            }
-            return;
-        }
+        // Non-dirty (including re-opening the same file): pull from GitHub then load.
+        self.pull_and_open_file(path, cx);
+    }
 
-        // Dirty document (with or without a saved path): always ask.
-        self.pending_open_path = Some(path);
-        self.show_unsaved_prompt = true;
+    /// Fetch the latest version of `path` from GitHub (if a sync binding and token exist),
+    /// overwrite the local file on success, then load the document into the editor.
+    /// All error paths fall back to opening whatever is on disk — no crash, no dialog.
+    fn pull_and_open_file(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        // Resolve sync binding — fall back to local open if none.
+        let (token, config, filename) = match self.resolve_pull_params(&path) {
+            Some(params) => params,
+            None => {
+                match octodocs_core::FileIo::open(&path) {
+                    Ok(doc) => self.load_document(doc, cx),
+                    Err(err) => eprintln!("Open error: {err}"),
+                }
+                return;
+            }
+        };
+
+        self.github_sync_status = SyncStatus::Syncing;
         cx.notify();
+
+        self._pull_task = Some(cx.spawn(async move |this, cx| {
+            let path_fallback = path.clone();
+
+            let result: anyhow::Result<(bool, Document)> = cx
+                .background_executor()
+                .spawn(async move {
+                    let pulled = octodocs_github::pull_file(&token, &config, &filename)?;
+                    if let Some(content) = pulled {
+                        std::fs::write(&path, content.as_bytes())
+                            .map_err(|e| anyhow::anyhow!("Failed to write pulled content to '{}': {e}", path.display()))?;
+                        let doc = octodocs_core::FileIo::open(&path)?;
+                        Ok((true, doc))
+                    } else {
+                        // 404 — file not yet on GitHub; open local copy.
+                        let doc = octodocs_core::FileIo::open(&path)?;
+                        Ok((false, doc))
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |state, cx| match result {
+                Ok((_pulled, doc)) => {
+                    state.github_sync_status = SyncStatus::Idle;
+                    state.load_document(doc, cx);
+                }
+                Err(err) => {
+                    state.github_sync_status = SyncStatus::Failed {
+                        message: err.to_string(),
+                    };
+                    match octodocs_core::FileIo::open(&path_fallback) {
+                        Ok(doc) => state.load_document(doc, cx),
+                        Err(e) => eprintln!("Open error: {e}"),
+                    }
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Resolve the GitHub pull parameters for `path`.
+    /// Returns `None` if no binding, no token, or no relative path can be computed.
+    fn resolve_pull_params(&self, path: &Path) -> Option<(String, octodocs_github::GitHubSyncConfig, String)> {
+        let binding = self.find_sync_binding(path)?;
+        let filename = Self::relative_sync_path(binding, path)?;
+        let token = octodocs_github::get_stored_token().ok()??;
+        Some((token, binding.config.clone(), filename))
     }
 
     /// Load a document from disk.

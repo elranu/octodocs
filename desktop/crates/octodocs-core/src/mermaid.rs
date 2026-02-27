@@ -27,7 +27,7 @@ pub fn render_png(source: &str, output: &Path) -> anyhow::Result<(f32, f32)> {
     let natural_h = tree.size().height();
 
     // Compute physical raster scale: aim for HIDPI_SCALE× but cap at MAX_WIDTH_PX.
-    let scale = (MAX_WIDTH_PX / natural_w).min(HIDPI_SCALE).max(0.5);
+    let scale = (MAX_WIDTH_PX / natural_w).clamp(0.5, HIDPI_SCALE);
     let out_w = ((natural_w * scale).round() as u32).max(1);
     let out_h = ((natural_h * scale).round() as u32).max(1);
 

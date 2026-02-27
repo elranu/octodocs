@@ -37,28 +37,56 @@ OctoDocs is that tool. It's a native desktop Markdown editor built for **everyon
 
 ## Getting Started
 
-### Requirements
+### Download (Pre-built Binaries)
 
-- **Linux** (primary target), macOS, or Windows
-- **Rust nightly** toolchain (managed automatically via `rust-toolchain.toml`)
-- **Linux system dependencies** for GPU-accelerated rendering:
-  ```bash
-  sudo apt install libxcb1-dev libxkbcommon-dev libwayland-dev libvulkan-dev vulkan-validationlayers libsecret-1-dev
-  ```
-
-### Build & Run
+#### Linux (x86_64)
 
 ```bash
-# Install Rust if you don't have it
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -f https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
+```
 
-# Clone the repo
+Installs to `~/.local/octodocs/` and symlinks `octodocs` into `~/.local/bin`. Or download `octodocs-linux-x86_64.tar.gz` manually from the [Releases page](https://github.com/elranu/octodocs/releases).
+
+#### macOS (Apple Silicon)
+
+Download `octodocs-macos-aarch64.dmg` from the [Releases page](https://github.com/elranu/octodocs/releases), open it, and drag **OctoDocs** to `/Applications`.
+
+> **Note:** The app is unsigned. On first launch, right-click → **Open**, or go to System Settings → Privacy & Security → **Open Anyway**.
+
+#### Windows (x86_64)
+
+Download `octodocs-windows-x86_64.zip` from the [Releases page](https://github.com/elranu/octodocs/releases), extract it, and run `octodocs-app.exe`.
+
+> **Note:** The binary is unsigned. Windows SmartScreen will show a warning. Click **"More info" → "Run anyway"**.
+
+---
+
+### Build from Source
+
+**Requirements:** [Rust](https://rustup.rs/) (nightly, auto-selected via `rust-toolchain.toml`)
+
+```bash
 git clone https://github.com/elranu/octodocs.git
 cd octodocs/desktop
-
-# Build and run (nightly toolchain is auto-selected)
 cargo run -p octodocs-app
 ```
+
+#### Linux — additional system dependencies
+
+```bash
+sudo apt install \
+  libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libvulkan-dev vulkan-validationlayers \
+  libsecret-1-dev libfontconfig-dev libasound2-dev libssl-dev
+```
+
+#### macOS
+
+No extra system dependencies — Xcode Command Line Tools + Rust is sufficient.
+
+#### Windows
+
+No extra system dependencies — `rustup` with the default MSVC toolchain is sufficient.
 
 ### Useful Commands
 
@@ -137,10 +165,10 @@ OctoDocs is in active development. Here's what's working:
 
 - [ ] Rich text parity improvements (nested inline styles, better keyboard shortcut coverage)
 - [ ] Cross-block selection and undo/redo
-- [ ] Pull changes from GitHub (currently push-only)
+- [x] Pull changes from GitHub on file open (remote wins)
 - [ ] Conflict resolution UI
 - [ ] Export to PDF/HTML
-- [ ] macOS and Windows builds
+- [x] macOS and Windows CI builds (experimental — may not be available every release)
 
 ### Implementation Notes
 

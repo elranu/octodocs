@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 
 use crate::client;
-use crate::{BranchInfo, FolderEntry, RepoInfo};
+use crate::{BranchInfo, FolderEntry, GitHubSyncConfig, RepoInfo};
 
 const API_BASE: &str = "https://api.github.com";
 
@@ -121,7 +121,7 @@ pub fn list_branches(token: &str, owner: &str, repo: &str) -> Result<Vec<BranchI
         }
     }
 
-    branches.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    branches.sort_by_key(|a| a.name.to_ascii_lowercase());
     Ok(branches)
 }
 
@@ -162,7 +162,7 @@ pub fn list_folder(
         })?;
 
     let value: serde_json::Value = response.json()
-        .with_context(|| format!("Failed to parse folder contents"))?;
+        .with_context(|| "Failed to parse folder contents".to_string())?;
 
     let items = value
         .as_array()
@@ -270,4 +270,78 @@ pub fn pull_markdown_files(
     let mut out = Vec::new();
     collect_markdown_files_recursive(token, owner, repo, branch, folder, &mut out)?;
     Ok(out)
+}
+
+/// Percent-encode each segment of a repo path (preserving `/` separators).
+fn percent_encode_path(path: &str) -> String {
+    path.split('/')
+        .map(|seg| {
+            seg.bytes()
+                .flat_map(|b| {
+                    if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                        vec![b as char]
+                    } else {
+                        format!("%{b:02X}").chars().collect::<Vec<_>>()
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Fetch a single file from GitHub, returning `None` if the file does not exist (404).
+/// Remote content is returned as a UTF-8 string on success.
+/// The path within the repo is resolved from `config.folder` + `filename`.
+pub fn pull_file(
+    token: &str,
+    config: &GitHubSyncConfig,
+    filename: &str,
+) -> Result<Option<String>> {
+    let repo_path = crate::sync::build_repo_path(config, filename);
+    let encoded_path = percent_encode_path(&repo_path);
+
+    let client = client::build(token)?;
+    let url = format!(
+        "{API_BASE}/repos/{}/{}/contents/{}?ref={}",
+        config.owner, config.repo, encoded_path, config.branch
+    );
+
+    let response = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("Failed to fetch '{repo_path}' from GitHub"))?;
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    let response = response
+        .error_for_status()
+        .with_context(|| format!("GitHub returned error while pulling '{repo_path}'"))?;
+
+    let file: FileContentApi = response
+        .json()
+        .with_context(|| format!("Failed to parse content response for '{repo_path}'"))?;
+
+    let content = file
+        .content
+        .ok_or_else(|| anyhow::anyhow!("Missing content in response for '{repo_path}'"))?;
+    let encoding = file.encoding.unwrap_or_default().to_ascii_lowercase();
+
+    if encoding != "base64" {
+        return Err(anyhow::anyhow!(
+            "Unsupported encoding '{encoding}' for '{repo_path}'"
+        ));
+    }
+
+    let normalized = content.replace('\n', "");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(normalized.as_bytes())
+        .with_context(|| format!("Failed to decode base64 for '{repo_path}'"))?;
+
+    let text = String::from_utf8(decoded)
+        .with_context(|| format!("File '{repo_path}' is not valid UTF-8"))?;
+
+    Ok(Some(text))
 }
