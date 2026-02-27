@@ -179,6 +179,12 @@ jobs:
           name: octodocs-linux-x86_64.tar.gz
           path: dist/
 
+      - name: Extract Linux binary for direct download
+        run: |
+          tar -xzf dist/octodocs-linux-x86_64.tar.gz -C dist
+          mv dist/octodocs-app dist/octodocs-linux-x86_64
+          chmod +x dist/octodocs-linux-x86_64
+
       - name: Download macOS artifact (optional)
         if: needs.build-macos.result == 'success'
         continue-on-error: true
@@ -207,7 +213,8 @@ jobs:
             ```bash
             curl -f https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
             ```
-            Or manually: extract `octodocs-linux-x86_64.tar.gz` and run `./octodocs-app`
+            Or download the **pre-extracted binary** directly: `octodocs-linux-x86_64` — just `chmod +x` and run.
+            Prefer the `.tar.gz` if you want the full archive.
 
             ### macOS (Apple Silicon)
             Download `octodocs-macos-aarch64.dmg`, open it, and drag **OctoDocs** to `/Applications`.
@@ -221,6 +228,7 @@ jobs:
             ---
             *macOS and Windows builds are experimental and may not be available for every release.*
           files: |
+            dist/octodocs-linux-x86_64
             dist/octodocs-linux-x86_64.tar.gz
             dist/octodocs-macos-aarch64.dmg
             dist/octodocs-windows-x86_64.zip

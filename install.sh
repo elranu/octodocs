@@ -51,21 +51,17 @@ main() {
     temp="$(mktemp -d)"
     # Ensure the temp dir is cleaned up on exit (success or error)
     trap 'rm -rf "$temp"' EXIT
-    tarball="$temp/octodocs-linux-x86_64.tar.gz"
+    binary="$temp/octodocs-app"
 
     echo "Downloading OctoDocs..."
-    download "https://github.com/$REPO/releases/latest/download/octodocs-linux-x86_64.tar.gz" > "$tarball"
+    download "https://github.com/$REPO/releases/latest/download/octodocs-linux-x86_64" > "$binary"
 
     echo "Installing to $INSTALL_DIR..."
-    # Only overwrite files from the package; do not wipe the entire install dir
     mkdir -p "$INSTALL_DIR"
-    tar -xzf "$tarball" -C "$INSTALL_DIR"
-
+    cp "$binary" "$INSTALL_DIR/octodocs-app"
     chmod +x "$INSTALL_DIR/octodocs-app"
     mkdir -p "$BIN_DIR"
     ln -sf "$INSTALL_DIR/octodocs-app" "$BIN_DIR/octodocs"
-
-    rm -rf "$temp"
 
     echo ""
     if echo ":${PATH}:" | grep -q ":$BIN_DIR:"; then

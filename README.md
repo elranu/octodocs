@@ -45,7 +45,7 @@ OctoDocs is that tool. It's a native desktop Markdown editor built for **everyon
 curl -f https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
 ```
 
-Installs to `~/.local/octodocs/` and symlinks `octodocs` into `~/.local/bin`. Or download `octodocs-linux-x86_64.tar.gz` manually from the [Releases page](https://github.com/elranu/octodocs/releases).
+Installs to `~/.local/octodocs/` and symlinks `octodocs` into `~/.local/bin`. Or grab the pre-extracted binary directly from the [Releases page](https://github.com/elranu/octodocs/releases): download `octodocs-linux-x86_64`, `chmod +x` it, and run.
 
 #### macOS (Apple Silicon)
 
