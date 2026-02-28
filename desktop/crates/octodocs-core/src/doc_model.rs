@@ -29,6 +29,11 @@ pub enum ParagraphKind {
     /// A Mermaid diagram island. The path is the cached PNG (may be empty
     /// until the render task completes). The source is stored in spans[0].
     Mermaid(PathBuf),
+    /// A GFM task list item. `checked` reflects the `[ ]`/`[x]` state.
+    TaskListItem { checked: bool },
+    /// An inline image. `path` is the relative URL (e.g. `images/photo.png`).
+    /// `height` is the display height in pixels (default 300; stored in markdown title).
+    Image { path: String, alt: String, height: f32 },
     /// A GFM table. `source` is the raw markdown for round-trip serialization.
     /// `headers` and `rows` are plain-text cell contents for WYSIWYG display.
     Table {
@@ -228,6 +233,15 @@ fn inlines_to_spans(inlines: &[Inline]) -> Vec<InlineSpan> {
 fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
     match node {
         RenderNode::Paragraph(inlines) => {
+            // Detect a standalone image paragraph (single Inline::Image)
+            if inlines.len() == 1 {
+                if let Inline::Image { alt, url, height } = &inlines[0] {
+                    return vec![DocParagraph {
+                        kind: ParagraphKind::Image { path: url.clone(), alt: alt.clone(), height: *height },
+                        spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+                    }];
+                }
+            }
             let spans = inlines_to_spans(inlines);
             vec![DocParagraph { kind: ParagraphKind::Paragraph, spans }]
         }
@@ -249,6 +263,10 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
                 kind: ParagraphKind::Mermaid(PathBuf::new()),
                 spans: vec![InlineSpan { text: src.clone(), format: InlineFormat::Plain }],
             }]
+        }
+        RenderNode::TaskListItem { checked, inlines } => {
+            let spans = inlines_to_spans(inlines);
+            vec![DocParagraph { kind: ParagraphKind::TaskListItem { checked: *checked }, spans }]
         }
         RenderNode::BlockQuote(nodes) => {
             let inner_spans: Vec<InlineSpan> = nodes
@@ -396,6 +414,18 @@ pub fn doc_paragraphs_to_markdown(paragraphs: &[DocParagraph]) -> String {
                 let src = para.plain_text();
                 format!("```mermaid\n{}\n```", src)
             }
+            ParagraphKind::TaskListItem { checked } => {
+                let marker = if *checked { "- [x] " } else { "- [ ] " };
+                format!("{}{}", marker, spans_to_markdown(&para.spans))
+            }
+            ParagraphKind::Image { path, alt, height } => {
+                // Only store height in title when it differs from the default (300px).
+                if (*height - 300.0).abs() < 1.0 {
+                    format!("![{alt}]({path})")
+                } else {
+                    format!("![{alt}]({path} \"{height:.0}\")")  
+                }
+            }
             ParagraphKind::Table { source, .. } => source.clone(),
         };
         parts.push(block);
@@ -525,5 +555,60 @@ mod tests {
         let mut para = DocParagraph::empty();
         para.spans[0].text = "hello".to_string();
         assert_eq!(para.char_count(), 5);
+    }
+
+    #[test]
+    fn image_roundtrip() {
+        let md = "![alt text](images/photo.png)\n";
+        let out = roundtrip(md);
+        assert!(out.contains("![alt text](images/photo.png)"), "got: {out}");
+    }
+
+    #[test]
+    fn image_height_roundtrip() {
+        // Non-default height is stored as a quoted numeric title.
+        let md = "![alt](images/photo.png \"450\")\n";
+        let out = roundtrip(md);
+        assert!(
+            out.contains("![alt](images/photo.png \"450\")"),
+            "expected height preserved in title, got: {out}"
+        );
+    }
+
+    #[test]
+    fn image_default_height_not_stored_in_title() {
+        // At the default 300px height the title should be omitted entirely.
+        let md = "![alt](images/photo.png)\n";
+        let out = roundtrip(md);
+        // Must NOT contain a " "300" " suffix.
+        assert!(
+            !out.contains("\"300\""),
+            "default height should not appear in serialised output, got: {out}"
+        );
+    }
+
+    #[test]
+    fn task_list_checked_roundtrip() {
+        let md = "- [x] Done task\n";
+        let out = roundtrip(md);
+        assert!(out.contains("- [x] Done task"), "got: {out}");
+    }
+
+    #[test]
+    fn task_list_unchecked_roundtrip() {
+        let md = "- [ ] Todo task\n";
+        let out = roundtrip(md);
+        assert!(out.contains("- [ ] Todo task"), "got: {out}");
+    }
+
+    #[test]
+    fn fix_link_urls_with_spaces_roundtrip() {
+        // Images with spaces in filenames should survive a parse → serialize round-trip.
+        let md = "![my photo](images/my photo.png)\n";
+        let out = roundtrip(md);
+        // After round-trip the path will have the space (the serialiser writes the
+        // clean path back; spaces in the original are normalised by copy_image_to_images_dir
+        // before insertion, but the parser must at least survive without panicking).
+        assert!(!out.is_empty(), "round-trip produced empty output for spaced URL");
     }
 }

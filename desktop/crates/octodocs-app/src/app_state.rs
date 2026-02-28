@@ -6,6 +6,28 @@ use gpui::{Subscription, Task};
 use octodocs_core::{Document, DocumentBlock, Renderer, markdown_to_doc_paragraphs};
 use octodocs_github::{GitHubSyncConfig, SyncStatus};
 
+/// Copy an external image file into `{doc_dir}/images/` and return the relative URL string.
+/// Falls back to `$TMPDIR/octodocs/images/` when the document has not been saved yet.
+pub fn copy_image_to_images_dir(src: &Path, doc_path: Option<&Path>) -> std::io::Result<String> {
+    let images_dir = doc_images_dir(doc_path);
+    std::fs::create_dir_all(&images_dir)?;
+    let filename = src.file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?;
+    // Sanitize: spaces are not valid in CommonMark URLs, replace with underscores.
+    let safe_name = filename.to_string_lossy().replace(' ', "_");
+    let dest = images_dir.join(&safe_name);
+    std::fs::copy(src, &dest)?;
+    Ok(format!("images/{}", safe_name))
+}
+
+fn doc_images_dir(doc_path: Option<&Path>) -> PathBuf {
+    doc_path
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::env::temp_dir().join("octodocs"))
+        .join("images")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubSyncBinding {
     pub local_root: PathBuf,
@@ -248,9 +270,15 @@ impl AppState {
             }
             if this.view_mode == ViewMode::Wysiwyg {
                 let markdown = this.doc_editor.read(cx).to_markdown();
-                this.document.content = markdown;
-                this.dirty = true;
-                cx.notify();
+                // Only mark dirty when the *content* actually changed.
+                // UI-only state changes (hover badge, zoom overlay) also call
+                // cx.notify() on doc_editor but don't alter the markdown, so
+                // we must compare before writing back to avoid a false dirty flag.
+                if markdown != this.document.content {
+                    this.document.content = markdown;
+                    this.dirty = true;
+                    cx.notify();
+                }
             }
         });
 
@@ -267,7 +295,11 @@ impl AppState {
 
         // Populate the word-style editor with the initial document.
         let paragraphs = markdown_to_doc_paragraphs(&document.content);
-        doc_editor.update(cx, |editor, cx| editor.load_document(paragraphs, cx));
+        let initial_doc_dir = document.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        doc_editor.update(cx, |editor, cx| {
+            editor.document_dir = initial_doc_dir;
+            editor.load_document(paragraphs, cx);
+        });
 
         let active_binding_idx = if github_bindings.is_empty() {
             None
@@ -359,7 +391,9 @@ impl AppState {
             self.blocks = Renderer::parse_blocks(&content);
             self.document.content = content.clone();
             let paragraphs = markdown_to_doc_paragraphs(&content);
+            let doc_dir = self.document.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
             self.doc_editor.update(cx, |editor, cx| {
+                editor.document_dir = doc_dir;
                 editor.load_document(paragraphs, cx);
             });
         }
@@ -386,7 +420,10 @@ impl AppState {
         self.pending_post_auth_action = None;
         self.loading_doc = 0; // reset any stale counter before incrementing
         self.loading_doc += 1;
-        self.doc_editor.update(cx, |editor, cx| editor.load_document(vec![], cx));
+        self.doc_editor.update(cx, |editor, cx| {
+            editor.document_dir = None;
+            editor.load_document(vec![], cx);
+        });
         self.loading_doc += 1;
         self.full_editor_state.update(cx, |state, cx| state.set_content("", cx));
         cx.notify();
@@ -492,8 +529,12 @@ impl AppState {
         // Populate the word-style editor with the new content.
         // Increment loading_doc so the observer doesn't mark dirty for these notifications.
         let paragraphs = markdown_to_doc_paragraphs(&content);
+        let doc_dir = doc.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
         self.loading_doc += 1;
-        self.doc_editor.update(cx, |editor, cx| editor.load_document(paragraphs, cx));
+        self.doc_editor.update(cx, |editor, cx| {
+            editor.document_dir = doc_dir;
+            editor.load_document(paragraphs, cx);
+        });
         // If currently in Source/Split, populate the full editor too.
         if self.view_mode != ViewMode::Wysiwyg {
             self.loading_doc += 1;
@@ -558,13 +599,37 @@ impl AppState {
 
         let content = self.document.content.clone();
 
+        // Collect local images referenced in the document to push alongside markdown
+        let doc_dir = path.parent().map(|p| p.to_path_buf());
+        let mut images_to_push: Vec<(String, Vec<u8>)> = Vec::new();
+        if let Some(ref dir) = doc_dir {
+            for rel_img in Self::extract_local_image_paths(&content) {
+                let full_img = dir.join(&rel_img);
+                if let Ok(bytes) = std::fs::read(&full_img) {
+                    if let Some(img_sync) = Self::relative_sync_path(binding, &full_img) {
+                        images_to_push.push((img_sync, bytes));
+                    }
+                }
+            }
+        }
+
         self.github_sync_status = SyncStatus::Syncing;
         cx.notify();
 
         self._sync_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { octodocs_github::push_file(&token, &config, &filename, &content) })
+                .spawn(async move {
+                    let push_result = octodocs_github::push_file(&token, &config, &filename, &content);
+                    if push_result.is_ok() {
+                        for (img_path, img_bytes) in &images_to_push {
+                            if let Err(e) = octodocs_github::push_binary_file(&token, &config, img_path, img_bytes) {
+                                eprintln!("[sync] Failed to push image '{}': {e}", img_path);
+                            }
+                        }
+                    }
+                    push_result
+                })
                 .await;
 
             let _ = this.update(cx, |state, cx| {
@@ -583,6 +648,25 @@ impl AppState {
                 cx.notify();
             });
         }));
+    }
+
+    fn extract_local_image_paths(markdown: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut rest = markdown;
+        while let Some(img_start) = rest.find("![") {
+            rest = &rest[img_start + 2..];
+            let Some(bracket_end) = rest.find("](") else { continue };
+            rest = &rest[bracket_end + 2..];
+            let url_end = rest
+                .find([')', '"', ' '])
+                .unwrap_or(rest.len());
+            let url = rest[..url_end].trim_matches('<').trim_matches('>');
+            if !url.is_empty() && !url.contains("://") {
+                paths.push(url.to_string());
+            }
+            rest = &rest[url_end..];
+        }
+        paths
     }
 
     fn find_sync_binding(&self, doc_path: &Path) -> Option<&GitHubSyncBinding> {
@@ -706,6 +790,8 @@ impl AppState {
         {
             match octodocs_core::FileIo::save_as(&self.document, &path) {
                 Ok(_) => {
+                    let doc_dir = path.parent().map(|p| p.to_path_buf());
+                    self.doc_editor.update(cx, |editor, _| editor.document_dir = doc_dir);
                     self.document.path = Some(path);
                     self.dirty = false;
                     self.persist_ui_state_to_disk();

@@ -80,11 +80,13 @@ pub fn get_file_sha(
     Ok(Some(content.sha))
 }
 
-pub fn push_file(
+/// Internal helper — pushes raw bytes to the GitHub Contents API.
+/// Both `push_file` and `push_binary_file` delegate here to avoid duplication.
+fn push_bytes(
     token: &str,
     config: &GitHubSyncConfig,
     filename: &str,
-    content: &str,
+    bytes: &[u8],
 ) -> Result<String> {
     let client = client::build(token)?;
     let path = build_repo_path(config, filename);
@@ -98,7 +100,7 @@ pub fn push_file(
 
     let body = CreateUpdateFileRequest {
         message: &message,
-        content: base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
+        content: base64::engine::general_purpose::STANDARD.encode(bytes),
         branch: &config.branch,
         sha: existing_sha.as_deref(),
     };
@@ -115,9 +117,7 @@ pub fn push_file(
         })?
         .error_for_status()
         .with_context(|| {
-            format!(
-                "GitHub returned error while pushing '{path}'",
-            )
+            format!("GitHub returned error while pushing '{path}'")
         })?;
 
     let update: FileUpdateResponse = response
@@ -125,6 +125,24 @@ pub fn push_file(
         .with_context(|| format!("Failed to parse push response for '{path}'"))?;
 
     Ok(update.commit.sha)
+}
+
+pub fn push_file(
+    token: &str,
+    config: &GitHubSyncConfig,
+    filename: &str,
+    content: &str,
+) -> Result<String> {
+    push_bytes(token, config, filename, content.as_bytes())
+}
+
+pub fn push_binary_file(
+    token: &str,
+    config: &GitHubSyncConfig,
+    filename: &str,
+    content: &[u8],
+) -> Result<String> {
+    push_bytes(token, config, filename, content)
 }
 
 pub fn delete_file(token: &str, config: &GitHubSyncConfig, filename: &str) -> Result<Option<String>> {
