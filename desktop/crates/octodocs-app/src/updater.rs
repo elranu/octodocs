@@ -51,7 +51,7 @@ pub fn launch_update(tag: &str) -> anyhow::Result<()> {
             .arg("/verysilent")
             .arg("/update=true")
             .spawn()?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -63,7 +63,7 @@ pub fn launch_update(tag: &str) -> anyhow::Result<()> {
             .arg("-c")
             .arg(format!("curl -fsSL '{install_url}' | sh"))
             .spawn()?;
-        return Ok(());
+        Ok(())
     }
 }
 
