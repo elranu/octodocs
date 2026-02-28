@@ -13,8 +13,8 @@ use octodocs_core::{
 };
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::cell::RefCell;
+use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Actions
@@ -157,6 +157,11 @@ pub struct DocumentEditorState {
     /// Set to Some(path) by a link click on a local .md file; the host app should
     /// consume this in its doc_editor observer and navigate to that document.
     pub navigate_request: Option<String>,
+    /// Shared image decode cache: abs path → decoded BGRA RenderImage.
+    /// Populated asynchronously by background tasks; paint reads without blocking.
+    pub image_cache: Arc<RwLock<HashMap<String, Arc<RenderImage>>>>,
+    /// In-flight decode keys so we don't spawn duplicate tasks.
+    pub pending_images: HashSet<String>,
 }
 
 impl DocumentEditorState {
@@ -178,6 +183,8 @@ impl DocumentEditorState {
             hovered_image_para: None,
             hovered_link: false,
             navigate_request: None,
+            image_cache: Arc::new(RwLock::new(HashMap::new())),
+            pending_images: HashSet::new(),
         }
     }
 
@@ -198,9 +205,48 @@ impl DocumentEditorState {
         self.hovered_image_para = None;
         self.drag_occurred = false;
         self.table_cursor = None;
-        // Evict the image decode cache when loading a new document so stale
-        // bitmaps (e.g. images deleted or replaced on disk) are not shown.
-        IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
+        // Fresh cache for the new document; any in-flight tasks from the old
+        // document captured the previous Arc so they write nowhere useful.
+        self.image_cache = Arc::new(RwLock::new(HashMap::new()));
+        self.pending_images.clear();
+        // Spawn background decode for every image paragraph so paint never blocks.
+        let doc_dir = self.document_dir.clone();
+        for para in &self.paragraphs {
+            if let ParagraphKind::Image { path, .. } = &para.kind {
+                let abs_path = doc_dir
+                    .as_ref()
+                    .map(|d| d.join(path.as_str()))
+                    .unwrap_or_else(|| PathBuf::from(path.as_str()));
+                let cache_key = abs_path.to_string_lossy().to_string();
+                if !self.pending_images.insert(cache_key.clone()) {
+                    continue; // already queued
+                }
+                let cache_ref = self.image_cache.clone();
+                cx.spawn(async move |this, cx| {
+                    let ri = cx
+                        .background_executor()
+                        .spawn(async move {
+                            std::fs::read(&abs_path).ok()
+                                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                                .map(|dyn_img| {
+                                    let mut rgba = dyn_img.into_rgba8();
+                                    for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                    Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                                })
+                        })
+                        .await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.pending_images.remove(&cache_key);
+                        if let Some(image) = ri {
+                            if let Ok(mut c) = cache_ref.write() {
+                                c.insert(cache_key, image);
+                            }
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+            }
+        }
         cx.notify();
     }
 
@@ -997,12 +1043,46 @@ impl DocumentEditorState {
     /// Insert an image paragraph after the current cursor position.
     pub fn insert_image_at_cursor(&mut self, path: String, alt: String, cx: &mut Context<Self>) {
         let para = DocParagraph {
-            kind: ParagraphKind::Image { path, alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
+            kind: ParagraphKind::Image { path: path.clone(), alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
             spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
         };
         let insert_at = self.cursor.para_idx + 1;
         self.paragraphs.insert(insert_at, para);
         self.cursor = DocCursor { para_idx: insert_at, char_offset: 0 };
+
+        // Kick off background decode for the newly inserted image.
+        let abs_path = self.document_dir
+            .as_ref()
+            .map(|d| d.join(&path))
+            .unwrap_or_else(|| PathBuf::from(&path));
+        let cache_key = abs_path.to_string_lossy().to_string();
+        if self.pending_images.insert(cache_key.clone()) {
+            let cache_ref = self.image_cache.clone();
+            cx.spawn(async move |this, cx| {
+                let ri = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::fs::read(&abs_path).ok()
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|dyn_img| {
+                                let mut rgba = dyn_img.into_rgba8();
+                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                            })
+                    })
+                    .await;
+                let _ = this.update(cx, |s, cx| {
+                    s.pending_images.remove(&cache_key);
+                    if let Some(image) = ri {
+                        if let Ok(mut c) = cache_ref.write() {
+                            c.insert(cache_key, image);
+                        }
+                    }
+                    cx.notify();
+                });
+            }).detach();
+        }
+
         cx.notify();
     }
 
@@ -1595,13 +1675,6 @@ const PARA_GAP: f32 = 8.0;
 const MERMAID_HEIGHT: f32 = 180.0;
 const IMAGE_BLOCK_DEFAULT_HEIGHT: f32 = 300.0;
 
-// Per-process image decode cache: path string → decoded BGRA RenderImage.
-// Using thread_local avoids any GPUI state entanglement; images are decoded
-// once on the first paint frame and served from memory thereafter.
-thread_local! {
-    static IMAGE_CACHE: RefCell<std::collections::HashMap<String, Arc<RenderImage>>> =
-        RefCell::new(std::collections::HashMap::new());
-}
 const TABLE_ROW_H: f32 = 28.0;
 const TABLE_CELL_PAD_X: f32 = 8.0;
 const TABLE_CELL_PAD_Y: f32 = 5.0;
@@ -2083,25 +2156,12 @@ impl Element for DocumentEditorElement {
                         .unwrap_or_else(|| PathBuf::from(path.as_str()));
                     let cache_key = abs_path.to_string_lossy().to_string();
 
-                    // Decode image once, cache forever in thread-local storage.
-                    let render_image: Option<Arc<RenderImage>> = IMAGE_CACHE.with(|cache| {
-                        let mut map = cache.borrow_mut();
-                        if let Some(ri) = map.get(&cache_key) {
-                            return Some(ri.clone());
-                        }
-                        let ri = std::fs::read(&abs_path).ok()
-                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
-                            .map(|dyn_img| {
-                                let mut rgba = dyn_img.into_rgba8();
-                                // GPUI requires BGRA: swap R and B channels.
-                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
-                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
-                            });
-                        if let Some(ri) = &ri {
-                            map.insert(cache_key, ri.clone());
-                        }
-                        ri
-                    });
+                    // Read from the async-populated cache; never decode on the UI thread.
+                    let render_image: Option<Arc<RenderImage>> = self.state.read(cx)
+                        .image_cache
+                        .read()
+                        .ok()
+                        .and_then(|c| c.get(&cache_key).cloned());
 
                     let top_screen = bounds.top() + px(current_y);
                     let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
