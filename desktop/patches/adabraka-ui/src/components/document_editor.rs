@@ -434,15 +434,10 @@ impl DocumentEditorState {
 
     /// Insert (or replace selection with) a hyperlink span.
     pub fn insert_link(&mut self, text: String, url: String, cx: &mut Context<Self>) {
-        // Delete selection first (single-paragraph only)
-        if let Some(sel) = self.selection {
-            let (start, end) = sel.ordered();
-            if start.para_idx == end.para_idx {
-                let count = end.char_offset - start.char_offset;
-                let new_cursor = self.do_delete_chars(start, count);
-                self.cursor = new_cursor;
-            }
-            self.selection = None;
+        // Delete any active selection first (including multi-paragraph) so the
+        // link reliably replaces whatever is selected.
+        if self.selection.is_some() {
+            self.cursor = self.delete_selection(cx);
         }
         let at = self.cursor;
         let para = &mut self.paragraphs[at.para_idx];
@@ -1711,8 +1706,11 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
+    // Use rundll32 instead of `cmd /C start` to avoid shell-metacharacter injection.
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let _ = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
     // Silence unused-variable warning on unsupported platforms
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     let _ = url;
@@ -2967,11 +2965,14 @@ impl RenderOnce for DocumentEditor {
                                 open_url(&url);
                             } else {
                                 // Local .md link — ask the host app to navigate.
-                                let resolved = s.document_dir
-                                    .as_ref()
-                                    .map(|dir| dir.join(&url).to_string_lossy().into_owned())
-                                    .unwrap_or(url);
-                                s.navigate_request = Some(resolved);
+                                // Only resolve when a base directory is known; otherwise
+                                // require an absolute path to avoid CWD-relative surprises.
+                                if let Some(dir) = s.document_dir.as_ref() {
+                                    let resolved = dir.join(&url).to_string_lossy().into_owned();
+                                    s.navigate_request = Some(resolved);
+                                } else if std::path::Path::new(&url).is_absolute() {
+                                    s.navigate_request = Some(url);
+                                }
                             }
                         }
                     }

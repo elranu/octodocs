@@ -587,6 +587,20 @@ mod tests {
     }
 
     #[test]
+    fn link_roundtrip() {
+        let md = "See [docs](README.md) for details\n";
+        let out = roundtrip(md);
+        assert!(out.contains("[docs](README.md)"), "link should round-trip, got: {out}");
+    }
+
+    #[test]
+    fn link_with_http_roundtrip() {
+        let md = "Visit [site](https://example.com)\n";
+        let out = roundtrip(md);
+        assert!(out.contains("[site](https://example.com)"), "http link should round-trip, got: {out}");
+    }
+
+    #[test]
     fn image_roundtrip() {
         let md = "![alt text](images/photo.png)\n";
         let out = roundtrip(md);

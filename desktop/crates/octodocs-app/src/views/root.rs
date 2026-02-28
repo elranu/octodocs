@@ -218,6 +218,11 @@ impl RootView {
         let aw = app_weak.clone();
         let link_h = move |_w: &mut Window, cx: &mut App| {
             let _ = aw.update(cx, |state, cx| {
+                // Only available in WYSIWYG mode; in Source/Split the doc_editor
+                // is not the active content so the insertion would be silently lost.
+                if state.view_mode != crate::app_state::ViewMode::Wysiwyg {
+                    return;
+                }
                 let prefill = state.doc_editor.read(cx).selected_text();
                 state.insert_link_prefill_text = prefill;
                 state.insert_link_modal_open = true;

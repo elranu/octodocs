@@ -724,6 +724,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_inline_link() {
+        let tree = Renderer::parse("See [docs](README.md) for details");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines.iter().any(|i| matches!(
+                    i,
+                    Inline::Link { text, url } if text == "docs" && url == "README.md"
+                )),
+                "expected Link inline, got: {:?}",
+                inlines
+            );
+        } else {
+            panic!("expected paragraph, got: {:?}", tree.0);
+        }
+    }
+
+    #[test]
+    fn parses_multiple_links_in_paragraph() {
+        let tree = Renderer::parse("[a](url1) and [b](url2)");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            let links: Vec<_> = inlines
+                .iter()
+                .filter_map(|i| if let Inline::Link { text, url } = i { Some((text.as_str(), url.as_str())) } else { None })
+                .collect();
+            assert_eq!(links, vec![("a", "url1"), ("b", "url2")], "got: {:?}", inlines);
+        } else {
+            panic!("expected paragraph");
+        }
+    }
+
+    #[test]
     fn fix_link_urls_with_spaces_rewrites_spaced_url() {
         // Image URL with a space should be parseable after preprocessing.
         let tree = Renderer::parse("![alt](images/my photo.png)\n");
