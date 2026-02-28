@@ -3727,6 +3727,7 @@ dependencies = [
  "dotenvy",
  "octodocs-core",
  "octodocs-github",
+ "reqwest",
  "rfd",
 ]
 
