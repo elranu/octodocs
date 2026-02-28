@@ -38,10 +38,10 @@ arch="$(uname -m)"
 
 case "$platform-$arch" in
     Linux-x86_64)
-        BINARY_NAME="octodocs-linux-x86_64"
+        TARBALL_NAME="octodocs-linux-x86_64.tar.gz"
         ;;
     Darwin-arm64|Darwin-aarch64)
-        BINARY_NAME="octodocs-macos-aarch64"
+        TARBALL_NAME="octodocs-macos-aarch64.tar.gz"
         ;;
     Darwin-x86_64)
         die "macOS x86_64 builds are not yet available. Download from: https://github.com/$REPO/releases/latest"
@@ -82,18 +82,28 @@ fi
 
 temp="$(mktemp -d)"
 trap 'rm -rf "$temp"' EXIT
-binary="$temp/octodocs-app"
+tarball="$temp/octodocs.tar.gz"
 
 say "Downloading..."
 download_progress \
-    "https://github.com/$REPO/releases/latest/download/$BINARY_NAME" \
-    "$binary"
-chmod +x "$binary"
+    "https://github.com/$REPO/releases/latest/download/$TARBALL_NAME" \
+    "$tarball"
+
+say "Extracting..."
+tar -xzf "$tarball" -C "$temp"
 
 # ─── install binary ──────────────────────────────────────────────────────────
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-cp "$binary" "$INSTALL_DIR/octodocs-app"
+cp "$temp/octodocs-app" "$INSTALL_DIR/octodocs-app"
+chmod +x "$INSTALL_DIR/octodocs-app"
+
+# Copy assets (SVG toolbar icons) so the app can find them at runtime
+if [ -d "$temp/assets" ]; then
+    rm -rf "$INSTALL_DIR/assets"
+    cp -r "$temp/assets" "$INSTALL_DIR/assets"
+fi
+
 printf '%s\n' "$VERSION" > "$VERSION_FILE"
 
 # ─── install icon ─────────────────────────────────────────────────────────────
@@ -165,6 +175,10 @@ DESKTOP
         mkdir -p "$APP_CONTENTS/MacOS"
         cp "$INSTALL_DIR/octodocs-app" "$APP_CONTENTS/MacOS/octodocs"
         chmod +x "$APP_CONTENTS/MacOS/octodocs"
+        # Copy icons so they're resolvable relative to the executable inside the bundle
+        if [ -d "$INSTALL_DIR/assets" ]; then
+            cp -r "$INSTALL_DIR/assets" "$APP_CONTENTS/MacOS/assets"
+        fi
         cat > "$APP_CONTENTS/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

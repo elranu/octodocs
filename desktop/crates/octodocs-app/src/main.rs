@@ -45,11 +45,19 @@ impl AssetSource for Assets {
 
 fn main() {
     let _ = dotenvy::dotenv();
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // In production installs, assets/ lives next to the executable.
+    // In development (cargo run / cargo build), the exe is inside target/{debug,release}/
+    // and assets/ is not there — so fall back to CARGO_MANIFEST_DIR which always has it.
+    let assets_base = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .filter(|d| d.join("assets").exists())
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
 
     Application::new()
         .with_assets(Assets {
-            base: manifest_dir,
+            base: assets_base,
         })
         .run(|cx: &mut App| {
             adabraka_ui::init(cx);

@@ -54,6 +54,8 @@ Name: "assocmd";        Description: "Associate .md and .markdown files"; GroupD
 
 [Files]
 Source: "{#BinaryPath}"; DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
+; Bundle the SVG icon assets next to the executable so the running app can find them
+Source: "..\..\crates\octodocs-app\assets\icons\*"; DestDir: "{app}\assets\icons"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}";              Filename: "{app}\{#AppExeName}"

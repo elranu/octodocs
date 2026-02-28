@@ -55,8 +55,10 @@ jobs:
 
       - name: Package artifact
         run: |
-          tar -czf octodocs-linux-x86_64.tar.gz \
-            -C target/release octodocs-app
+          mkdir -p dist
+          cp target/release/octodocs-app dist/
+          cp -r crates/octodocs-app/assets dist/
+          tar -czf octodocs-linux-x86_64.tar.gz -C dist .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -92,6 +94,7 @@ jobs:
         run: |
           mkdir -p OctoDocs.app/Contents/MacOS
           cp target/release/octodocs-app OctoDocs.app/Contents/MacOS/octodocs
+          cp -r crates/octodocs-app/assets OctoDocs.app/Contents/MacOS/assets
           cat > OctoDocs.app/Contents/Info.plist << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -109,6 +112,13 @@ jobs:
           </plist>
           PLIST
 
+      - name: Create tarball (for install.sh)
+        run: |
+          mkdir -p macos-dist
+          cp target/release/octodocs-app macos-dist/octodocs-app
+          cp -r crates/octodocs-app/assets macos-dist/assets
+          tar -czf octodocs-macos-aarch64.tar.gz -C macos-dist .
+
       - name: Create DMG
         run: |
           hdiutil create -volname "OctoDocs" \
@@ -121,6 +131,13 @@ jobs:
         with:
           name: octodocs-macos-aarch64.dmg
           path: desktop/octodocs-macos-aarch64.dmg
+          if-no-files-found: error
+
+      - name: Upload macOS tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octodocs-macos-aarch64.tar.gz
+          path: desktop/octodocs-macos-aarch64.tar.gz
           if-no-files-found: error
 
       - name: Upload raw binary artifact
@@ -215,6 +232,14 @@ jobs:
           name: octodocs-macos-aarch64.dmg
           path: dist/
 
+      - name: Download macOS tarball (optional)
+        if: needs.build-macos.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: octodocs-macos-aarch64.tar.gz
+          path: dist/
+
       - name: Download macOS binary (optional)
         if: needs.build-macos.result == 'success'
         continue-on-error: true
@@ -268,8 +293,10 @@ jobs:
             Prefer the `.tar.gz` if you want the full archive.
 
             ### macOS (Apple Silicon)
-            - **Easy install:** `octodocs-macos-aarch64` — raw binary, `chmod +x` and run directly.
+            - **Easy install (recommended):** `curl -fsSL https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh`
+            - **Tarball:** `octodocs-macos-aarch64.tar.gz` — binary + assets, extract and run.
             - **Full installer:** `octodocs-macos-aarch64.dmg` — open and drag **OctoDocs** to `/Applications`.
+            - **Raw binary:** `octodocs-macos-aarch64` — single file, `chmod +x` and run (no toolbar icons).
             > **Note:** The app is unsigned. Right-click → **Open** on first launch, or:
             > System Settings → Privacy & Security → **Open Anyway**
 
@@ -285,6 +312,7 @@ jobs:
             dist/octodocs-linux-x86_64
             dist/octodocs-linux-x86_64.tar.gz
             dist/octodocs-macos-aarch64
+            dist/octodocs-macos-aarch64.tar.gz
             dist/octodocs-macos-aarch64.dmg
             dist/OctoDocs-Setup-x86_64.exe
             dist/octodocs-windows-x86_64.exe
