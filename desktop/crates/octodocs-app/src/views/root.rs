@@ -544,7 +544,11 @@ impl Render for RootView {
                     })
                     .child(sync_badge)
                     .child(mode_badge)
-                    .child(body_small("UTF-8")),
+                    .child(body_small("UTF-8"))
+                    .child(
+                        body_small(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .color(theme.tokens.muted_foreground),
+                    ),
             );
 
         // Build editor area based on view mode.
