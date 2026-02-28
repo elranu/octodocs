@@ -137,6 +137,10 @@ pub struct AppState {
     _autosave_task: Option<Task<()>>,
     /// Background task that polls the system for dark/light mode changes (Linux).
     _theme_watcher_task: Option<Task<()>>,
+    /// Whether the Insert Link dialog is visible.
+    pub insert_link_modal_open: bool,
+    /// Pre-filled text for the Insert Link dialog (copied from the current selection).
+    pub insert_link_prefill_text: String,
 }
 
 impl AppState {
@@ -285,6 +289,14 @@ impl AppState {
 
         // When the doc_editor changes (WYSIWYG mode), sync markdown back to document.
         let doc_editor_sub = cx.observe(&doc_editor, |this, _, cx| {
+            // Consume any in-app .md navigation request set by a link click.
+            let nav = this.doc_editor.update(cx, |ed, _| ed.navigate_request.take());
+            if let Some(path_str) = nav {
+                let path = std::path::PathBuf::from(&path_str);
+                this.open_file_from_link(path, cx);
+                return;
+            }
+
             // Skip if this notification came from load_document, not from the user.
             if this.loading_doc > 0 {
                 this.loading_doc -= 1;
@@ -368,6 +380,8 @@ impl AppState {
             is_dark: initial_is_dark,
             _autosave_task: None,
             _theme_watcher_task: None,
+            insert_link_modal_open: false,
+            insert_link_prefill_text: String::new(),
             _import_summary_version: 0,
             _sync_task: None,
             _pull_task: None,
@@ -589,6 +603,28 @@ impl AppState {
 
         // Non-dirty (including re-opening the same file): pull from GitHub then load.
         self.pull_and_open_file(path, cx);
+    }
+
+    /// Open a local .md file immediately from disk without a GitHub pull.
+    /// Used for in-editor link navigation where instant feedback matters.
+    pub fn open_file_from_link(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        if self.dirty {
+            self.pending_open_path = Some(path);
+            self.show_unsaved_prompt = true;
+            cx.notify();
+            return;
+        }
+        // Read the file on the background executor so the UI thread is never blocked.
+        self._pull_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { octodocs_core::FileIo::open(&path) })
+                .await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(doc) => state.load_document(doc, cx),
+                Err(e) => eprintln!("Link navigation error: {e}"),
+            });
+        }));
     }
 
     /// Fetch the latest version of `path` from GitHub (if a sync binding and token exist),

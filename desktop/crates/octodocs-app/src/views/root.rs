@@ -8,6 +8,7 @@ use super::document_editor_pane::DocumentEditorPane;
 use super::editor_pane::EditorPane;
 use super::github_auth_modal::GithubAuthModal;
 use super::github_sidebar::GithubSidebar;
+use super::insert_link_modal::InsertLinkModal;
 use super::preview_pane::PreviewPane;
 use super::repo_add_modal::RepoAddModal;
 use crate::app_state::{AppState, PostAuthAction, UpdateStatus, copy_image_to_images_dir};
@@ -20,6 +21,7 @@ pub struct RootView {
     github_sidebar: Entity<GithubSidebar>,
     github_auth_modal: Entity<GithubAuthModal>,
     repo_add_modal: Entity<RepoAddModal>,
+    insert_link_modal: Entity<InsertLinkModal>,
     toolbar: Entity<Toolbar>,
     _pane_subscription: Subscription,
     _root_subscription: Subscription,
@@ -33,6 +35,7 @@ impl RootView {
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
         let github_sidebar = cx.new(|cx| GithubSidebar::new(app_state.clone(), cx));
         let repo_add_modal = cx.new(|cx| RepoAddModal::new(app_state.clone(), cx));
+        let insert_link_modal = cx.new(|cx| InsertLinkModal::new(app_state.clone(), cx));
         let repo_modal_weak_for_auth = repo_add_modal.downgrade();
         let github_auth_modal = cx.new(|_| {
             GithubAuthModal::new(
@@ -60,10 +63,12 @@ impl RootView {
         // Re-render root and overlays when AppState changes.
         let auth_modal_clone = github_auth_modal.clone();
         let repo_modal_clone = repo_add_modal.clone();
+        let link_modal_clone = insert_link_modal.clone();
         let root_subscription = cx.observe(&app_state, move |_this, _, cx| {
             cx.notify();
             auth_modal_clone.update(cx, |_, cx| cx.notify());
             repo_modal_clone.update(cx, |_, cx| cx.notify());
+            link_modal_clone.update(cx, |_, cx| cx.notify());
         });
 
         // toolbar actions operate on the single doc_editor entity.
@@ -211,6 +216,21 @@ impl RootView {
         };
 
         let aw = app_weak.clone();
+        let link_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                // Only available in WYSIWYG mode; in Source/Split the doc_editor
+                // is not the active content so the insertion would be silently lost.
+                if state.view_mode != crate::app_state::ViewMode::Wysiwyg {
+                    return;
+                }
+                let prefill = state.doc_editor.read(cx).selected_text();
+                state.insert_link_prefill_text = prefill;
+                state.insert_link_modal_open = true;
+                cx.notify();
+            });
+        };
+
+        let aw = app_weak.clone();
         let theme_h = move |_w: &mut Window, cx: &mut App| {
             let _ = aw.update(cx, |state, cx| {
                 state.is_dark = !state.is_dark;
@@ -302,6 +322,11 @@ impl RootView {
                                 .tooltip("Insert Image")
                                 .on_click(insert_image_h),
                         )
+                        .button(
+                            ToolbarButton::new("link", IconSource::Named("link".into()))
+                                .tooltip("Insert Link")
+                                .on_click(link_h),
+                        )
                         .separator()
                         .button(
                             ToolbarButton::new("h1", IconSource::Named("heading-1".into()))
@@ -386,6 +411,7 @@ impl RootView {
             github_sidebar,
             github_auth_modal,
             repo_add_modal,
+            insert_link_modal,
             toolbar,
             _pane_subscription: subscription,
             _root_subscription: root_subscription,
@@ -403,6 +429,7 @@ impl Render for RootView {
         let view_mode = app.view_mode;
         let auth_modal_open = app.auth_modal_open;
         let repo_add_modal_open = app.repo_add_modal_open;
+        let insert_link_modal_open = app.insert_link_modal_open;
         let sidebar_open = app.sidebar_open;
         let show_unsaved_prompt = app.show_unsaved_prompt;
         let pending_window_close = app.pending_window_close;
@@ -821,6 +848,9 @@ impl Render for RootView {
             })
             .when(repo_add_modal_open, |this| {
                 this.child(self.repo_add_modal.clone())
+            })
+            .when(insert_link_modal_open, |this| {
+                this.child(self.insert_link_modal.clone())
             })
             .when(show_unsaved_prompt, |this| {
                 this.child(unsaved_prompt_modal)

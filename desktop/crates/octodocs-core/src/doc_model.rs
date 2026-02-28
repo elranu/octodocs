@@ -48,6 +48,19 @@ pub enum ParagraphKind {
 pub struct InlineSpan {
     pub text: String,
     pub format: InlineFormat,
+    /// Non-None only when `format == InlineFormat::Link`.
+    pub link_url: Option<String>,
+}
+
+impl InlineSpan {
+    /// Construct a plain/formatted span (no link).
+    pub fn plain(text: impl Into<String>, format: InlineFormat) -> Self {
+        Self { text: text.into(), format, link_url: None }
+    }
+    /// Construct a link span.
+    pub fn link(text: impl Into<String>, url: impl Into<String>) -> Self {
+        Self { text: text.into(), format: InlineFormat::Link, link_url: Some(url.into()) }
+    }
 }
 
 /// Inline formatting variants (simplified for MVP).
@@ -59,6 +72,8 @@ pub enum InlineFormat {
     Underline,
     Strikethrough,
     Code,
+    /// Hyperlink — URL stored in InlineSpan.link_url.
+    Link,
 }
 
 /// Cursor position inside the document.
@@ -131,7 +146,7 @@ impl DocParagraph {
     pub fn empty() -> Self {
         Self {
             kind: ParagraphKind::Paragraph,
-            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
         }
     }
 }
@@ -199,33 +214,33 @@ fn inlines_to_spans(inlines: &[Inline]) -> Vec<InlineSpan> {
     let mut spans: Vec<InlineSpan> = Vec::new();
     for inline in inlines {
         match inline {
-            Inline::Text(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Plain }),
-            Inline::Bold(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Bold }),
-            Inline::Italic(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Italic }),
-            Inline::Underline(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Underline }),
-            Inline::Strikethrough(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Strikethrough }),
-            Inline::Code(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Code }),
-            Inline::Link { text, .. } => spans.push(InlineSpan { text: text.clone(), format: InlineFormat::Plain }),
-            Inline::Image { alt, .. } => spans.push(InlineSpan { text: alt.clone(), format: InlineFormat::Plain }),
+            Inline::Text(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Plain, link_url: None }),
+            Inline::Bold(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Bold, link_url: None }),
+            Inline::Italic(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Italic, link_url: None }),
+            Inline::Underline(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Underline, link_url: None }),
+            Inline::Strikethrough(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Strikethrough, link_url: None }),
+            Inline::Code(t) => spans.push(InlineSpan { text: t.clone(), format: InlineFormat::Code, link_url: None }),
+            Inline::Link { text, url, .. } => spans.push(InlineSpan { text: text.clone(), format: InlineFormat::Link, link_url: Some(url.clone()) }),
+            Inline::Image { alt, .. } => spans.push(InlineSpan { text: alt.clone(), format: InlineFormat::Plain, link_url: None }),
             Inline::SoftBreak => {
                 if let Some(last) = spans.last_mut() {
                     last.text.push(' ');
                 } else {
-                    spans.push(InlineSpan { text: " ".to_string(), format: InlineFormat::Plain });
+                    spans.push(InlineSpan { text: " ".to_string(), format: InlineFormat::Plain, link_url: None });
                 }
             }
             Inline::HardBreak => {
                 if let Some(last) = spans.last_mut() {
                     last.text.push('\n');
                 } else {
-                    spans.push(InlineSpan { text: "\n".to_string(), format: InlineFormat::Plain });
+                    spans.push(InlineSpan { text: "\n".to_string(), format: InlineFormat::Plain, link_url: None });
                 }
             }
         }
     }
 
     if spans.is_empty() {
-        spans.push(InlineSpan { text: String::new(), format: InlineFormat::Plain });
+        spans.push(InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None });
     }
     spans
 }
@@ -238,7 +253,7 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
                 if let Inline::Image { alt, url, height } = &inlines[0] {
                     return vec![DocParagraph {
                         kind: ParagraphKind::Image { path: url.clone(), alt: alt.clone(), height: *height },
-                        spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+                        spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
                     }];
                 }
             }
@@ -248,20 +263,20 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
         RenderNode::Heading { level, text } => {
             vec![DocParagraph {
                 kind: ParagraphKind::Heading(*level),
-                spans: vec![InlineSpan { text: text.clone(), format: InlineFormat::Plain }],
+                spans: vec![InlineSpan { text: text.clone(), format: InlineFormat::Plain, link_url: None }],
             }]
         }
         RenderNode::CodeBlock { lang, content } => {
             let text = content.trim_end_matches('\n').to_string();
             vec![DocParagraph {
                 kind: ParagraphKind::CodeFence(lang.clone()),
-                spans: vec![InlineSpan { text, format: InlineFormat::Plain }],
+                spans: vec![InlineSpan { text, format: InlineFormat::Plain, link_url: None }],
             }]
         }
         RenderNode::MermaidBlock(src) => {
             vec![DocParagraph {
                 kind: ParagraphKind::Mermaid(PathBuf::new()),
-                spans: vec![InlineSpan { text: src.clone(), format: InlineFormat::Plain }],
+                spans: vec![InlineSpan { text: src.clone(), format: InlineFormat::Plain, link_url: None }],
             }]
         }
         RenderNode::TaskListItem { checked, inlines } => {
@@ -274,7 +289,7 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
                 .flat_map(render_node_to_doc_paragraphs)
                 .flat_map(|p| {
                     let mut ss = p.spans;
-                    ss.push(InlineSpan { text: "\n".to_string(), format: InlineFormat::Plain });
+                    ss.push(InlineSpan { text: "\n".to_string(), format: InlineFormat::Plain, link_url: None });
                     ss
                 })
                 .collect();
@@ -301,7 +316,7 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
                 .collect();
             vec![DocParagraph {
                 kind: ParagraphKind::Table { source, headers: header_texts, rows: row_texts },
-                spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+                spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
             }]
         }
     }
@@ -332,13 +347,14 @@ pub fn markdown_to_doc_paragraphs(markdown: &str) -> Vec<DocParagraph> {
 fn spans_to_markdown(spans: &[InlineSpan]) -> String {
     // Coalesce adjacent spans that share the same format so serialization
     // doesn't emit redundant marker sequences like `********`.
+    // For Link spans also require matching URLs before merging.
     let mut merged: Vec<InlineSpan> = Vec::new();
     for span in spans {
         if span.text.is_empty() {
             continue;
         }
         if let Some(last) = merged.last_mut() {
-            if last.format == span.format {
+            if last.format == span.format && last.link_url == span.link_url {
                 last.text.push_str(&span.text);
                 continue;
             }
@@ -347,6 +363,7 @@ fn spans_to_markdown(spans: &[InlineSpan]) -> String {
             merged.push(InlineSpan {
                 text: span.text.clone(),
                 format: span.format,
+                link_url: span.link_url.clone(),
             });
         }
     }
@@ -379,6 +396,14 @@ fn spans_to_markdown(spans: &[InlineSpan]) -> String {
                 s.push('`');
                 s.push_str(&span.text);
                 s.push('`');
+            }
+            InlineFormat::Link => {
+                let url = span.link_url.as_deref().unwrap_or("");
+                s.push('[');
+                s.push_str(&span.text);
+                s.push_str("](");
+                s.push_str(url);
+                s.push(')');
             }
         }
     }
@@ -507,10 +532,12 @@ mod tests {
                 InlineSpan {
                     text: "bold".to_string(),
                     format: InlineFormat::Bold,
+                    link_url: None,
                 },
                 InlineSpan {
                     text: "also bold".to_string(),
                     format: InlineFormat::Bold,
+                    link_url: None,
                 },
             ],
         }];
@@ -528,6 +555,7 @@ mod tests {
                 spans: vec![InlineSpan {
                     text: "first".to_string(),
                     format: InlineFormat::Plain,
+                    link_url: None,
                 }],
             },
             DocParagraph::empty(),
@@ -536,6 +564,7 @@ mod tests {
                 spans: vec![InlineSpan {
                     text: "third".to_string(),
                     format: InlineFormat::Plain,
+                    link_url: None,
                 }],
             },
         ];
@@ -555,6 +584,20 @@ mod tests {
         let mut para = DocParagraph::empty();
         para.spans[0].text = "hello".to_string();
         assert_eq!(para.char_count(), 5);
+    }
+
+    #[test]
+    fn link_roundtrip() {
+        let md = "See [docs](README.md) for details\n";
+        let out = roundtrip(md);
+        assert!(out.contains("[docs](README.md)"), "link should round-trip, got: {out}");
+    }
+
+    #[test]
+    fn link_with_http_roundtrip() {
+        let md = "Visit [site](https://example.com)\n";
+        let out = roundtrip(md);
+        assert!(out.contains("[site](https://example.com)"), "http link should round-trip, got: {out}");
     }
 
     #[test]

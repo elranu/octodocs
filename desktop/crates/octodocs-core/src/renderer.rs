@@ -227,6 +227,8 @@ impl Renderer {
         let mut italic = false;
         let mut strikethrough = false;
         let mut underline = false;
+        // Link state
+        let mut in_link: Option<String> = None;
         // List / task list state
         let mut in_list_item = false;
         let mut task_list_checked: Option<bool> = None;
@@ -410,6 +412,12 @@ impl Renderer {
                 Event::End(TagEnd::Emphasis) => italic = false,
                 Event::Start(Tag::Strikethrough) => strikethrough = true,
                 Event::End(TagEnd::Strikethrough) => strikethrough = false,
+                Event::Start(Tag::Link { dest_url, .. }) => {
+                    in_link = Some(dest_url.to_string());
+                }
+                Event::End(TagEnd::Link) => {
+                    in_link = None;
+                }
 
                 Event::Html(html) | Event::InlineHtml(html) => {
                     let token = html.trim().to_lowercase();
@@ -441,6 +449,10 @@ impl Renderer {
                     } else if in_heading.is_some() {
                         heading_text.push_str(&s);
                     } else if in_paragraph || in_list_item {
+                        if let Some(ref url) = in_link {
+                            inline_buf.push(Inline::Link { text: s, url: url.clone() });
+                            continue;
+                        }
                         let inline = if bold {
                             Inline::Bold(s)
                         } else if italic {
@@ -709,6 +721,37 @@ mod tests {
             &tree.0[0],
             RenderNode::TaskListItem { checked: false, .. }
         ), "got: {:?}", tree.0);
+    }
+
+    #[test]
+    fn parses_inline_link() {
+        let tree = Renderer::parse("See [docs](README.md) for details");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines.iter().any(|i| matches!(
+                    i,
+                    Inline::Link { text, url } if text == "docs" && url == "README.md"
+                )),
+                "expected Link inline, got: {:?}",
+                inlines
+            );
+        } else {
+            panic!("expected paragraph, got: {:?}", tree.0);
+        }
+    }
+
+    #[test]
+    fn parses_multiple_links_in_paragraph() {
+        let tree = Renderer::parse("[a](url1) and [b](url2)");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            let links: Vec<_> = inlines
+                .iter()
+                .filter_map(|i| if let Inline::Link { text, url } = i { Some((text.as_str(), url.as_str())) } else { None })
+                .collect();
+            assert_eq!(links, vec![("a", "url1"), ("b", "url2")], "got: {:?}", inlines);
+        } else {
+            panic!("expected paragraph");
+        }
     }
 
     #[test]
