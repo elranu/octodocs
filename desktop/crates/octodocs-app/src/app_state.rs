@@ -131,6 +131,12 @@ pub struct AppState {
     /// Progress of an in-progress update.
     pub update_status: UpdateStatus,
     _update_task: Option<Task<()>>,
+    /// Whether the UI is currently in dark mode.
+    pub is_dark: bool,
+    /// Background task that auto-saves every 60 seconds when dirty.
+    _autosave_task: Option<Task<()>>,
+    /// Background task that polls the system for dark/light mode changes (Linux).
+    _theme_watcher_task: Option<Task<()>>,
 }
 
 impl AppState {
@@ -255,7 +261,7 @@ impl AppState {
         let _ = std::fs::write(path, lines.join("\n"));
     }
 
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new_with(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
         let doc_editor = cx.new(DocumentEditorState::new);
         let full_editor_state = cx.new(|cx| {
             adabraka_ui::components::editor::EditorState::new(cx)
@@ -282,6 +288,12 @@ impl AppState {
             // Skip if this notification came from load_document, not from the user.
             if this.loading_doc > 0 {
                 this.loading_doc -= 1;
+                // Normalize document.content to the round-trip output so that any
+                // whitespace differences introduced by markdown→paragraphs→markdown
+                // don't produce a false dirty flag on the next user edit.
+                if this.view_mode == ViewMode::Wysiwyg {
+                    this.document.content = this.doc_editor.read(cx).to_markdown();
+                }
                 return;
             }
             if this.view_mode == ViewMode::Wysiwyg {
@@ -353,6 +365,9 @@ impl AppState {
             update_available: None,
             update_status: UpdateStatus::Idle,
             _update_task: None,
+            is_dark: initial_is_dark,
+            _autosave_task: None,
+            _theme_watcher_task: None,
             _import_summary_version: 0,
             _sync_task: None,
             _pull_task: None,
@@ -360,6 +375,88 @@ impl AppState {
             _doc_editor_subscription: doc_editor_sub,
             _full_content_subscription: full_subscription,
         };
+
+        // Auto-save every 60 seconds when there are unsaved changes and a path exists.
+        // To avoid UI stalls, disk I/O is done on the background executor:
+        //   1. Capture path + content on the UI thread and clear dirty.
+        //   2. Write the file off-thread.
+        //   3. On success, trigger GitHub sync back on the UI thread.
+        //   4. On failure, restore dirty so the next cycle retries.
+        state._autosave_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .spawn(async move { std::thread::sleep(Duration::from_secs(60)); })
+                    .await;
+
+                // Step 1: capture on UI thread.
+                let snapshot = this.update(cx, |state, cx| {
+                    if state.dirty {
+                        if let Some(path) = state.document.path.clone() {
+                            let content = state.document.content.clone();
+                            state.dirty = false;
+                            cx.notify();
+                            return Some((path, content));
+                        }
+                    }
+                    None
+                });
+
+                let Ok(Some((path, content))) = snapshot else {
+                    continue;
+                };
+
+                // Step 2: write off-thread.
+                let write_path = path.clone();
+                let write_content = content.clone();
+                let write_result = cx
+                    .background_executor()
+                    .spawn(async move { std::fs::write(&write_path, write_content.as_bytes()) })
+                    .await;
+
+                // Step 3/4: back on UI thread — trigger sync or restore dirty on error.
+                let _ = this.update(cx, |state, cx| {
+                    match write_result {
+                        Ok(()) => {
+                            state.trigger_github_sync(cx);
+                        }
+                        Err(e) => {
+                            eprintln!("Auto-save error: {e}");
+                            // Restore dirty so next cycle retries.
+                            state.dirty = true;
+                            cx.notify();
+                        }
+                    }
+                });
+            }
+        }));
+
+        // On Linux, poll gsettings every 3 s and apply a theme switch when detected.
+        #[cfg(target_os = "linux")]
+        {
+            state._theme_watcher_task = Some(cx.spawn(async move |this, cx| {
+                let mut last_dark = initial_is_dark;
+                loop {
+                    cx.background_executor()
+                        .spawn(async move { std::thread::sleep(Duration::from_secs(3)); })
+                        .await;
+                    let current = cx.background_executor()
+                        .spawn(async move { crate::linux_is_dark_mode() })
+                        .await;
+                    if current != last_dark {
+                        last_dark = current;
+                        let _ = this.update(cx, |state, cx| {
+                            state.is_dark = current;
+                            if current {
+                                install_theme(cx, Theme::dark());
+                            } else {
+                                install_theme(cx, Theme::light());
+                            }
+                            cx.notify();
+                        });
+                    }
+                }
+            }));
+        }
 
         // Kick off background update check after 3 s so it never delays startup.
         state._update_task = Some(cx.spawn(async move |this, cx| {
