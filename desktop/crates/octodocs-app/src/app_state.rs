@@ -274,9 +274,15 @@ impl AppState {
             }
             if this.view_mode == ViewMode::Wysiwyg {
                 let markdown = this.doc_editor.read(cx).to_markdown();
-                this.document.content = markdown;
-                this.dirty = true;
-                cx.notify();
+                // Only mark dirty when the *content* actually changed.
+                // UI-only state changes (hover badge, zoom overlay) also call
+                // cx.notify() on doc_editor but don't alter the markdown, so
+                // we must compare before writing back to avoid a false dirty flag.
+                if markdown != this.document.content {
+                    this.document.content = markdown;
+                    this.dirty = true;
+                    cx.notify();
+                }
             }
         });
 

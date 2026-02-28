@@ -148,6 +148,10 @@ pub struct DocumentEditorState {
     pub document_dir: Option<PathBuf>,
     /// Tracks an in-progress image-block resize drag: (para_idx, original_height, drag_start_y).
     pub image_resize_drag: Option<(usize, f32, f32)>,
+    /// When Some, a full-size zoom overlay is shown for this image path.
+    pub image_zoom: Option<PathBuf>,
+    /// Index of the image paragraph the mouse is currently hovering over (for magnifier badge).
+    pub hovered_image_para: Option<usize>,
 }
 
 impl DocumentEditorState {
@@ -165,6 +169,8 @@ impl DocumentEditorState {
             table_cursor: None,
             document_dir: None,
             image_resize_drag: None,
+            image_zoom: None,
+            hovered_image_para: None,
         }
     }
 
@@ -181,6 +187,8 @@ impl DocumentEditorState {
         self.layout_cache.clear();
         self.drag_anchor = None;
         self.image_resize_drag = None;
+        self.image_zoom = None;
+        self.hovered_image_para = None;
         self.drag_occurred = false;
         self.table_cursor = None;
         cx.notify();
@@ -1461,7 +1469,6 @@ const TOP_PADDING: f32 = 24.0;
 const PARA_GAP: f32 = 8.0;
 const MERMAID_HEIGHT: f32 = 180.0;
 const IMAGE_BLOCK_DEFAULT_HEIGHT: f32 = 300.0;
-const IMAGE_BLOCK_HEIGHT: f32 = IMAGE_BLOCK_DEFAULT_HEIGHT; // kept for legacy refs
 
 // Per-process image decode cache: path string → decoded BGRA RenderImage.
 // Using thread_local avoids any GPUI state entanglement; images are decoded
@@ -1991,6 +1998,43 @@ impl Element for DocumentEditorElement {
                         theme.tokens.border.opacity(0.55),
                     ));
 
+                    // Magnifier badge in top-right corner when hovered.
+                    let is_hovered = self.state.read(cx).hovered_image_para == Some(para_idx);
+                    if is_hovered {
+                        let badge_size = 32.0_f32;
+                        let badge_x = left + block_w - px(badge_size + 8.0);
+                        let badge_y = top_screen + px(8.0);
+                        let badge_bounds = Bounds::new(
+                            point(badge_x, badge_y),
+                            size(px(badge_size), px(badge_size)),
+                        );
+                        window.paint_quad(gpui::PaintQuad {
+                            bounds: badge_bounds,
+                            corner_radii: gpui::Corners::all(px(badge_size / 2.0)),
+                            background: gpui::rgba(0x000000cc).into(),
+                            border_widths: gpui::Edges::all(px(0.0)),
+                            border_color: gpui::transparent_black(),
+                            border_style: gpui::BorderStyle::Solid,
+                            continuous_corners: false,
+                        });
+                        let icon = "\u{1f50d}"; // 🔍
+                        let icon_run = TextRun {
+                            len: icon.len(),
+                            font: base_font.clone(),
+                            color: gpui::white(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shaped = window.text_system().shape_line(
+                            icon.into(), px(16.0), &[icon_run], None,
+                        );
+                        let _ = shaped.paint(
+                            point(badge_x + px(8.0), badge_y + px(8.0)),
+                            px(24.0), window, cx,
+                        );
+                    }
+
                     visual_lines.push(VisualLine {
                         para_idx,
                         char_start: 0,
@@ -2517,6 +2561,69 @@ impl RenderOnce for DocumentEditor {
                     return;
                 }
 
+                // Detect single click on the magnifier badge (top-right corner of image).
+                {
+                    let s = state.read(cx);
+                    let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+                    let left = bounds.left() + px(LEFT_MARGIN);
+                    let badge_size = 32.0_f32;
+                    for vl in &s.layout_cache {
+                        let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
+                        if let ParagraphKind::Image { path, .. } = &para.kind {
+                            let top_screen = bounds.top() + px(vl.top_px);
+                            let badge_x = left + block_w - px(badge_size + 8.0);
+                            let badge_y = top_screen + px(8.0);
+                            let in_badge = event.position.x >= badge_x
+                                && event.position.x <= badge_x + px(badge_size)
+                                && event.position.y >= badge_y
+                                && event.position.y <= badge_y + px(badge_size);
+                            if in_badge {
+                                if let Some(ref dir) = s.document_dir {
+                                    let img_path = dir.join(path.as_str());
+                                    let _ = s;
+                                    state.update(cx, |st, cx| {
+                                        st.image_zoom = Some(img_path);
+                                        cx.notify();
+                                    });
+                                    window.focus(&focus);
+                                    return;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Detect double-click on an image block → show full-size zoom overlay.
+                if event.click_count >= 2 {
+                    let zoom_path: Option<PathBuf> = {
+                        let s = state.read(cx);
+                        let mut found = None;
+                        for vl in &s.layout_cache {
+                            let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
+                            if let ParagraphKind::Image { path, .. } = &para.kind {
+                                let block_top = bounds.top() + px(vl.top_px);
+                                let block_bottom = block_top + px(vl.height_px);
+                                if event.position.y >= block_top && event.position.y <= block_bottom {
+                                    if let Some(ref dir) = s.document_dir {
+                                        found = Some(dir.join(path));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        found
+                    };
+                    if let Some(img_path) = zoom_path {
+                        state.update(cx, |s, cx| {
+                            s.image_zoom = Some(img_path);
+                            cx.notify();
+                        });
+                        window.focus(&focus);
+                        return;
+                    }
+                }
+
                 state.update(cx, |s, cx| {
                     s.cursor = new_cursor;
                     s.table_cursor = new_table_cell;
@@ -2553,6 +2660,38 @@ impl RenderOnce for DocumentEditor {
                         cx.notify();
                     });
                     return;
+                }
+
+                // Track which image block (if any) the cursor is hovering over.
+                {
+                    let (bounds, new_hovered) = {
+                        let s = state_move.read(cx);
+                        let b = s.last_bounds.unwrap_or_default();
+                        let mut found = None;
+                        for vl in &s.layout_cache {
+                            if s.paragraphs.get(vl.para_idx)
+                                .map(|p| matches!(p.kind, ParagraphKind::Image { .. }))
+                                .unwrap_or(false)
+                            {
+                                let top = b.top() + px(vl.top_px);
+                                let bot = top + px(vl.height_px);
+                                if event.position.y >= top && event.position.y <= bot {
+                                    found = Some(vl.para_idx);
+                                    break;
+                                }
+                            }
+                        }
+                        (b, found)
+                    };
+                    let _ = bounds;
+                    let prev = state_move.read(cx).hovered_image_para;
+                    if prev != new_hovered {
+                        state_move.update(cx, |s, cx| {
+                            s.hovered_image_para = new_hovered;
+                            cx.notify();
+                        });
+                        return;
+                    }
                 }
 
                 let (bounds, drag_anchor) = {
