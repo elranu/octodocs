@@ -1,88 +1,208 @@
 #!/usr/bin/env sh
-# Installs OctoDocs to ~/.local/
+# OctoDocs installer — Linux x86_64 + macOS aarch64
 #
 # Usage:
-#   curl -f https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
 #
-# Supported: Linux x86_64
+# After install:
+#   octodocs            — launch the app
+#   octodocs --version  — print installed version
+#   octodocs --update   — update to the latest release
 
 set -eu
 
 REPO="elranu/octodocs"
-INSTALL_DIR="$HOME/.local/octodocs"
+INSTALL_DIR="$HOME/.local/share/octodocs"
 BIN_DIR="$HOME/.local/bin"
 
-main() {
-    platform="$(uname -s)"
-    arch="$(uname -m)"
+# ─── helpers ──────────────────────────────────────────────────────────────────
 
-    case "$platform" in
-        Linux) ;;
-        Darwin)
-            echo "On macOS, download the .dmg directly from:"
-            echo "  https://github.com/$REPO/releases/latest"
-            exit 1
-            ;;
-        *)
-            echo "Unsupported platform: $platform"
-            exit 1
-            ;;
-    esac
+say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-    case "$arch" in
-        x86_64) ;;
-        *)
-            echo "Unsupported architecture: $arch"
-            echo "Only x86_64 is currently available. Check releases manually:"
-            echo "  https://github.com/$REPO/releases/latest"
-            exit 1
-            ;;
-    esac
+if command -v curl >/dev/null 2>&1; then
+    download()          { curl -fsSL "$@"; }
+    download_progress() { curl -fL --progress-bar "$1" -o "$2"; }
+elif command -v wget >/dev/null 2>&1; then
+    download()          { wget -qO- "$@"; }
+    download_progress() { wget -q --show-progress -O "$2" "$1"; }
+else
+    die "'curl' or 'wget' is required to install OctoDocs"
+fi
 
-    if command -v curl >/dev/null 2>&1; then
-        download() { command curl -fL "$@"; }
-    elif command -v wget >/dev/null 2>&1; then
-        download() { wget -O- "$@"; }
-    else
-        echo "Error: 'curl' or 'wget' is required to install OctoDocs"
-        exit 1
-    fi
+# ─── platform detection ───────────────────────────────────────────────────────
 
-    temp="$(mktemp -d)"
-    # Ensure the temp dir is cleaned up on exit (success or error)
-    trap 'rm -rf "$temp"' EXIT
-    binary="$temp/octodocs-app"
+platform="$(uname -s)"
+arch="$(uname -m)"
 
-    echo "Downloading OctoDocs..."
-    download "https://github.com/$REPO/releases/latest/download/octodocs-linux-x86_64" > "$binary"
+case "$platform-$arch" in
+    Linux-x86_64)
+        BINARY_NAME="octodocs-linux-x86_64"
+        ;;
+    Darwin-arm64|Darwin-aarch64)
+        BINARY_NAME="octodocs-macos-aarch64"
+        ;;
+    Darwin-x86_64)
+        die "macOS x86_64 builds are not yet available. Download from: https://github.com/$REPO/releases/latest"
+        ;;
+    *)
+        die "Unsupported platform: $platform $arch. Check: https://github.com/$REPO/releases/latest"
+        ;;
+esac
 
-    echo "Installing to $INSTALL_DIR..."
-    mkdir -p "$INSTALL_DIR"
-    cp "$binary" "$INSTALL_DIR/octodocs-app"
-    chmod +x "$INSTALL_DIR/octodocs-app"
-    mkdir -p "$BIN_DIR"
-    ln -sf "$INSTALL_DIR/octodocs-app" "$BIN_DIR/octodocs"
+# ─── version detection ────────────────────────────────────────────────────────
 
-    echo ""
-    if echo ":${PATH}:" | grep -q ":$BIN_DIR:"; then
-        echo "OctoDocs installed successfully. Run with: octodocs"
-    else
-        echo "OctoDocs installed to $INSTALL_DIR"
-        echo "To run it from your terminal, add ~/.local/bin to your PATH:"
-        case "$SHELL" in
-            *zsh)
-                echo "  echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.zshrc && source ~/.zshrc"
-                ;;
-            *fish)
-                echo "  fish_add_path -U \$HOME/.local/bin"
-                ;;
-            *)
-                echo "  echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.bashrc && source ~/.bashrc"
-                ;;
-        esac
-        echo ""
-        echo "Or run directly: $BIN_DIR/octodocs"
-    fi
+latest_version() {
+    download "https://api.github.com/repos/$REPO/releases/latest" \
+        | grep '"tag_name"' \
+        | sed 's/.*"tag_name": *"\(.*\)".*/\1/'
 }
 
-main "$@"
+VERSION_FILE="$INSTALL_DIR/VERSION"
+INSTALLED_VERSION=""
+[ -f "$VERSION_FILE" ] && INSTALLED_VERSION="$(cat "$VERSION_FILE")"
+
+say "Checking latest version..."
+VERSION="$(latest_version)"
+[ -n "$VERSION" ] || die "Could not determine latest version — check your internet connection."
+
+if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+    ok "OctoDocs $VERSION is already up to date."
+    exit 0
+fi
+
+if [ -n "$INSTALLED_VERSION" ]; then
+    say "Updating OctoDocs $INSTALLED_VERSION → $VERSION"
+else
+    say "Installing OctoDocs $VERSION"
+fi
+
+# ─── download ────────────────────────────────────────────────────────────────
+
+temp="$(mktemp -d)"
+trap 'rm -rf "$temp"' EXIT
+binary="$temp/octodocs-app"
+
+say "Downloading..."
+download_progress \
+    "https://github.com/$REPO/releases/latest/download/$BINARY_NAME" \
+    "$binary"
+chmod +x "$binary"
+
+# ─── install binary ──────────────────────────────────────────────────────────
+
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+cp "$binary" "$INSTALL_DIR/octodocs-app"
+printf '%s\n' "$VERSION" > "$VERSION_FILE"
+
+# ─── install icon ─────────────────────────────────────────────────────────────
+
+ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+mkdir -p "$ICON_DIR"
+download "https://raw.githubusercontent.com/elranu/octodocs/main/assets/octoDocs-icon.svg" \
+    > "$ICON_DIR/octodocs.svg" 2>/dev/null || true
+
+# ─── wrapper script ───────────────────────────────────────────────────────────
+# Thin shell wrapper so --version and --update work without the GUI app handling args.
+
+cat > "$BIN_DIR/octodocs" << 'WRAPPER'
+#!/usr/bin/env sh
+INSTALL_DIR="$HOME/.local/share/octodocs"
+VERSION_FILE="$INSTALL_DIR/VERSION"
+case "${1:-}" in
+  --version|-v|version)
+    if [ -f "$VERSION_FILE" ]; then
+      printf 'OctoDocs %s\n' "$(cat "$VERSION_FILE")"
+    else
+      printf 'OctoDocs (version unknown)\n'
+    fi
+    ;;
+  --update|update)
+    printf 'Updating OctoDocs...\n'
+    curl -fsSL https://raw.githubusercontent.com/elranu/octodocs/main/install.sh | sh
+    ;;
+  *)
+    exec "$INSTALL_DIR/octodocs-app" "$@"
+    ;;
+esac
+WRAPPER
+chmod +x "$BIN_DIR/octodocs"
+
+# ─── platform-specific integration ────────────────────────────────────────────
+
+case "$platform" in
+    Linux)
+        # .desktop entry — picked up by GNOME, KDE, XFCE and other XDG desktops
+        DESKTOP_DIR="$HOME/.local/share/applications"
+        mkdir -p "$DESKTOP_DIR"
+        cat > "$DESKTOP_DIR/octodocs.desktop" << DESKTOP
+[Desktop Entry]
+Name=OctoDocs
+Comment=Markdown editor with GitHub sync
+Exec=$BIN_DIR/octodocs %F
+Icon=octodocs
+Type=Application
+Categories=Office;TextEditor;
+MimeType=text/markdown;text/plain;
+StartupNotify=true
+Terminal=false
+Keywords=markdown;editor;notes;github;docs;
+DESKTOP
+        # Refresh caches so GNOME/KDE pick up the new entry immediately
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+        fi
+        ok "Desktop shortcut created — check your app launcher"
+        ;;
+
+    Darwin)
+        # Minimal .app bundle in ~/Applications so Spotlight and Finder work
+        APP_CONTENTS="$HOME/Applications/OctoDocs.app/Contents"
+        mkdir -p "$APP_CONTENTS/MacOS"
+        cp "$INSTALL_DIR/octodocs-app" "$APP_CONTENTS/MacOS/octodocs"
+        chmod +x "$APP_CONTENTS/MacOS/octodocs"
+        cat > "$APP_CONTENTS/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>octodocs</string>
+    <key>CFBundleIdentifier</key><string>io.github.elranu.octodocs</string>
+    <key>CFBundleName</key><string>OctoDocs</string>
+    <key>CFBundleDisplayName</key><string>OctoDocs</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
+</dict>
+</plist>
+PLIST
+        ok "App bundle created at ~/Applications/OctoDocs.app (open via Spotlight or Finder)"
+        ;;
+esac
+
+# ─── done ─────────────────────────────────────────────────────────────────────
+
+echo ""
+if echo ":${PATH}:" | grep -q ":$BIN_DIR:"; then
+    ok "OctoDocs $VERSION installed successfully."
+    echo ""
+    echo "  octodocs            — launch"
+    echo "  octodocs --version  — show installed version"
+    echo "  octodocs --update   — update to latest"
+else
+    ok "OctoDocs $VERSION installed to $INSTALL_DIR"
+    echo ""
+    echo "  Add ~/.local/bin to your PATH to use the 'octodocs' command:"
+    case "${SHELL:-}" in
+        *zsh)  echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
+        *fish) echo "    fish_add_path -U \$HOME/.local/bin" ;;
+        *)     echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;
+    esac
+    echo ""
+    echo "  Or launch directly: $BIN_DIR/octodocs"
+fi
+echo ""

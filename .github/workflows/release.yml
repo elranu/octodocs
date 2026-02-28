@@ -135,7 +135,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   build-windows:
     name: Build · Windows x86_64
-    runs-on: windows-latest
+    runs-on: windows-2022
     continue-on-error: true
     defaults:
       run:
@@ -154,23 +154,31 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p octodocs-app
 
-      - name: Package artifact
+      - name: Build Inno Setup installer
+        shell: pwsh
         run: |
-          Compress-Archive `
-            -Path target\release\octodocs-app.exe `
-            -DestinationPath octodocs-windows-x86_64.zip
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $binaryPath = "$PWD\target\release\octodocs-app.exe"
+          $issPath = "$PWD\resources\windows\octodocs.iss"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc `
+            "/dAppVersion=$version" `
+            "/dBinaryPath=$binaryPath" `
+            "/O$PWD" `
+            $issPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: octodocs-windows-x86_64.zip
-          path: desktop/octodocs-windows-x86_64.zip
+          name: OctoDocs-Setup-x86_64.exe
+          path: desktop/OctoDocs-Setup-x86_64.exe
           if-no-files-found: error
 
       - name: Upload raw .exe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: octodocs-windows-x86_64.exe
+          name: octodocs-windows-x86_64-raw.exe
           path: desktop/target/release/octodocs-app.exe
           if-no-files-found: error
 
@@ -222,23 +230,23 @@ jobs:
             chmod +x dist/octodocs-macos-aarch64
           fi
 
-      - name: Download Windows ZIP (optional)
+      - name: Download Windows installer (optional)
         if: needs.build-windows.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: octodocs-windows-x86_64.zip
+          name: OctoDocs-Setup-x86_64.exe
           path: dist/
 
-      - name: Download Windows .exe (optional)
+      - name: Download Windows raw binary (optional)
         if: needs.build-windows.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: octodocs-windows-x86_64.exe
+          name: octodocs-windows-x86_64-raw.exe
           path: dist/
 
-      - name: Rename Windows binary
+      - name: Rename Windows raw binary
         run: |
           if [ -f dist/octodocs-app.exe ]; then
             mv dist/octodocs-app.exe dist/octodocs-windows-x86_64.exe
@@ -266,9 +274,9 @@ jobs:
             > System Settings → Privacy & Security → **Open Anyway**
 
             ### Windows (x86_64)
-            - **Easy install:** `octodocs-windows-x86_64.exe` — download and run directly.
-            - **Archive:** `octodocs-windows-x86_64.zip` — extract and run `octodocs-app.exe`.
-            > **Note:** The binary is unsigned. Windows SmartScreen will warn you.
+            - **Installer:** `OctoDocs-Setup-x86_64.exe` — full wizard installer with Start Menu & optional Desktop shortcut, uninstaller, PATH setup, and `.md` file association.
+            - **Portable:** `octodocs-windows-x86_64.exe` — raw binary, just download and run.
+            > **Note:** The binaries are unsigned. Windows SmartScreen will warn you.
             > Click **"More info" → "Run anyway"** to launch.
 
             ---
@@ -278,5 +286,5 @@ jobs:
             dist/octodocs-linux-x86_64.tar.gz
             dist/octodocs-macos-aarch64
             dist/octodocs-macos-aarch64.dmg
+            dist/OctoDocs-Setup-x86_64.exe
             dist/octodocs-windows-x86_64.exe
-            dist/octodocs-windows-x86_64.zip
