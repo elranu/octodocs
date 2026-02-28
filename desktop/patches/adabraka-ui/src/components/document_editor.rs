@@ -405,6 +405,79 @@ impl DocumentEditorState {
         cx.notify();
     }
 
+    /// Return the link URL for the span that contains the character at `char_offset - 1`
+    /// (i.e., the character the user clicked on or is positioned just after).
+    pub fn link_url_at_offset(&self, para_idx: usize, char_offset: usize) -> Option<String> {
+        let para = self.paragraphs.get(para_idx)?;
+        // char_offset is a gap position; the clicked char is at offset-1 (or 0 at start).
+        let check = if char_offset > 0 { char_offset - 1 } else { 0 };
+        let mut pos = 0usize;
+        for span in &para.spans {
+            let len = span.text.chars().count();
+            if check >= pos && check < pos + len.max(1) {
+                return if span.format == InlineFormat::Link { span.link_url.clone() } else { None };
+            }
+            pos += len;
+        }
+        None
+    }
+
+    /// If the word immediately before the cursor looks like a URL
+    /// (starts with `http://` or `https://`), convert it in-place to a Link span.
+    /// Called automatically by `insert_text` when the user types a space or Enter.
+    fn try_autolink(&mut self) {
+        let para_idx = self.cursor.para_idx;
+        if !matches!(
+            self.paragraphs[para_idx].kind,
+            ParagraphKind::Paragraph | ParagraphKind::Heading(_)
+        ) {
+            return;
+        }
+        let flat = self.paragraphs[para_idx].plain_text();
+        let chars_before: Vec<char> = flat.chars().take(self.cursor.char_offset).collect();
+        if chars_before.is_empty() {
+            return;
+        }
+        // Position after the last whitespace character = start of the last word.
+        let word_start = chars_before
+            .iter()
+            .rposition(|&c| c == ' ' || c == '\n' || c == '\t')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if word_start >= chars_before.len() {
+            return;
+        }
+        let word: String = chars_before[word_start..].iter().collect();
+        if !word.starts_with("http://") && !word.starts_with("https://") {
+            return;
+        }
+        // Skip if the span at word_start is already a Link.
+        {
+            let mut pos = 0usize;
+            for span in &self.paragraphs[para_idx].spans {
+                let len = span.text.chars().count();
+                if word_start < pos + len {
+                    if span.format == InlineFormat::Link {
+                        return;
+                    }
+                    break;
+                }
+                pos += len;
+            }
+        }
+        // Replace [word_start, cursor.char_offset) with a Link span.
+        let url = word.clone();
+        let para = &mut self.paragraphs[para_idx];
+        let (left_all, right) = Self::split_spans_at_char(&para.spans, self.cursor.char_offset);
+        let (before_word, _) = Self::split_spans_at_char(&left_all, word_start);
+        let mut new_spans = before_word;
+        new_spans.push(InlineSpan { text: url.clone(), format: InlineFormat::Link, link_url: Some(url) });
+        new_spans.extend(right);
+        Self::merge_adjacent_spans(&mut new_spans);
+        para.spans = new_spans;
+        // cursor.char_offset stays the same — total char count did not change.
+    }
+
     /// Delete the current selection, return new cursor position (at selection start).
     fn delete_selection(&mut self, cx: &mut Context<Self>) -> DocCursor {
         let Some(sel) = self.selection.take() else { return self.cursor; };
@@ -676,9 +749,17 @@ impl DocumentEditorState {
             }
         }
         // ────────────────────────────────────────────────────────────────────────
+        let had_selection = self.selection.is_some();
         if let Some(_) = self.selection {
             let at = self.delete_selection(cx);
             self.cursor = at;
+        }
+
+        // URL auto-linking: when the user types a space or Enter without an active
+        // selection, check whether the word just before the cursor is a bare URL
+        // and convert it to a Link span automatically.
+        if !had_selection && (text == " " || text == "\n") {
+            self.try_autolink();
         }
 
         if text == "\n" {
@@ -1542,6 +1623,19 @@ fn gfm_rebuild_from_strings(headers: &[String], rows: &[Vec<String>]) -> String 
 fn table_height(headers: &[String], rows: &[Vec<String>]) -> f32 {
     let _ = headers;
     TABLE_ROW_H * (1 + rows.len()) as f32 + 2.0
+}
+
+/// Open a URL or local file path using the system default handler.
+fn open_url(url: &str) {
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    // Silence unused-variable warning on unsupported platforms
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let _ = url;
 }
 
 fn para_font_size(kind: &ParagraphKind) -> f32 {
@@ -2767,6 +2861,21 @@ impl RenderOnce for DocumentEditor {
                     if s.image_resize_drag.take().is_some() {
                         cx.notify();
                         return;
+                    }
+                    // Plain click (no drag): open link if the cursor landed on a Link span.
+                    if !s.drag_occurred {
+                        if let Some(url) = s.link_url_at_offset(s.cursor.para_idx, s.cursor.char_offset) {
+                            let resolved = if url.starts_with("http://") || url.starts_with("https://") {
+                                url
+                            } else {
+                                // Relative .md path — resolve against document directory.
+                                s.document_dir
+                                    .as_ref()
+                                    .map(|dir| dir.join(&url).to_string_lossy().into_owned())
+                                    .unwrap_or(url)
+                            };
+                            open_url(&resolved);
+                        }
                     }
                     // Plain click clears selection; completed drag preserves it.
                     if !s.drag_occurred {
