@@ -13,7 +13,7 @@ use super::github_auth_modal::GithubAuthModal;
 use super::github_sidebar::GithubSidebar;
 use super::preview_pane::PreviewPane;
 use super::repo_add_modal::RepoAddModal;
-use crate::app_state::{AppState, PostAuthAction};
+use crate::app_state::{AppState, PostAuthAction, copy_image_to_images_dir};
 
 pub struct RootView {
     pub app_state: Entity<AppState>,
@@ -135,6 +135,36 @@ impl RootView {
             let _ = aw.update(cx, |state, cx| {
                 state.doc_editor.update(cx, |editor, cx| editor.toggle_strikethrough(cx));
             });
+        };
+
+        let aw = app_weak.clone();
+        let checkbox_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_task_list_item(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let insert_image_h = move |_w: &mut Window, cx: &mut App| {
+            if let Some(src) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"])
+                .pick_file()
+            {
+                let _ = aw.update(cx, |state, cx| {
+                    let doc_path = state.document.path.as_deref();
+                    match copy_image_to_images_dir(&src, doc_path) {
+                        Ok(rel) => {
+                            let alt = src.file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            state.doc_editor.update(cx, |editor, cx| {
+                                editor.insert_image_at_cursor(rel, alt, cx);
+                            });
+                        }
+                        Err(e) => eprintln!("Image insert error: {e}"),
+                    }
+                });
+            }
         };
 
         let aw = app_weak.clone();
@@ -263,6 +293,16 @@ impl RootView {
                                 .tooltip("Strikethrough")
                                 .on_click(strike_h),
                         )
+                        .button(
+                            ToolbarButton::new("checkbox", IconSource::Named("square-check".into()))
+                                .tooltip("Toggle Task List Item")
+                                .on_click(checkbox_h),
+                        )
+                        .button(
+                            ToolbarButton::new("image", IconSource::Named("image".into()))
+                                .tooltip("Insert Image")
+                                .on_click(insert_image_h),
+                        )
                         .separator()
                         .button(
                             ToolbarButton::new("h1", IconSource::Named("heading-1".into()))
@@ -279,6 +319,7 @@ impl RootView {
                                 .tooltip("Inline Code")
                                 .on_click(code_h),
                         )
+                        .separator()
                         .button(
                             ToolbarButton::new("table", IconSource::Named("table".into()))
                                 .tooltip("Insert Table")
@@ -295,7 +336,7 @@ impl RootView {
                                 .on_click(add_col_h),
                         )
                         .button(
-                            ToolbarButton::new("row-remove", IconSource::Named("x".into()))
+                            ToolbarButton::new("row-remove", IconSource::Named("trash-2".into()))
                                 .tooltip("Remove Row")
                                 .on_click(remove_row_h),
                         )

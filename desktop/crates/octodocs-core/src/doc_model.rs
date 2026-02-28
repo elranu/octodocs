@@ -29,6 +29,11 @@ pub enum ParagraphKind {
     /// A Mermaid diagram island. The path is the cached PNG (may be empty
     /// until the render task completes). The source is stored in spans[0].
     Mermaid(PathBuf),
+    /// A GFM task list item. `checked` reflects the `[ ]`/`[x]` state.
+    TaskListItem { checked: bool },
+    /// An inline image. `path` is the relative URL (e.g. `images/photo.png`).
+    /// `height` is the display height in pixels (default 300; stored in markdown title).
+    Image { path: String, alt: String, height: f32 },
     /// A GFM table. `source` is the raw markdown for round-trip serialization.
     /// `headers` and `rows` are plain-text cell contents for WYSIWYG display.
     Table {
@@ -228,6 +233,15 @@ fn inlines_to_spans(inlines: &[Inline]) -> Vec<InlineSpan> {
 fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
     match node {
         RenderNode::Paragraph(inlines) => {
+            // Detect a standalone image paragraph (single Inline::Image)
+            if inlines.len() == 1 {
+                if let Inline::Image { alt, url, height } = &inlines[0] {
+                        return vec![DocParagraph {
+                            kind: ParagraphKind::Image { path: url.clone(), alt: alt.clone(), height: *height },
+                        spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+                    }];
+                }
+            }
             let spans = inlines_to_spans(inlines);
             vec![DocParagraph { kind: ParagraphKind::Paragraph, spans }]
         }
@@ -249,6 +263,10 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
                 kind: ParagraphKind::Mermaid(PathBuf::new()),
                 spans: vec![InlineSpan { text: src.clone(), format: InlineFormat::Plain }],
             }]
+        }
+        RenderNode::TaskListItem { checked, inlines } => {
+            let spans = inlines_to_spans(inlines);
+            vec![DocParagraph { kind: ParagraphKind::TaskListItem { checked: *checked }, spans }]
         }
         RenderNode::BlockQuote(nodes) => {
             let inner_spans: Vec<InlineSpan> = nodes
@@ -395,6 +413,18 @@ pub fn doc_paragraphs_to_markdown(paragraphs: &[DocParagraph]) -> String {
             ParagraphKind::Mermaid(_) => {
                 let src = para.plain_text();
                 format!("```mermaid\n{}\n```", src)
+            }
+            ParagraphKind::TaskListItem { checked } => {
+                let marker = if *checked { "- [x] " } else { "- [ ] " };
+                format!("{}{}", marker, spans_to_markdown(&para.spans))
+            }
+            ParagraphKind::Image { path, alt, height } => {
+                // Only store height in title when it differs from the default (300px).
+                if (*height - 300.0).abs() < 1.0 {
+                    format!("![{alt}]({path})")
+                } else {
+                    format!("![{alt}]({path} \"{height:.0}\")")  
+                }
             }
             ParagraphKind::Table { source, .. } => source.clone(),
         };

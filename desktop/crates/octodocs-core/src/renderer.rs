@@ -40,6 +40,8 @@ pub enum RenderNode {
     ThematicBreak,
     BlockQuote(Vec<RenderNode>),
     List { ordered: bool, items: Vec<Vec<RenderNode>> },
+    /// A GFM task list item (`- [ ]` or `- [x]`).
+    TaskListItem { checked: bool, inlines: Vec<Inline> },
     /// A GFM table. `headers` is the header row; `rows` are the body rows.
     /// Each cell is a list of `Inline` nodes (may have bold/italic etc.).
     Table {
@@ -57,9 +59,85 @@ pub enum Inline {
     Strikethrough(String),
     Code(String),
     Link { text: String, url: String },
-    Image { alt: String, url: String },
+    Image { alt: String, url: String, height: f32 },
     SoftBreak,
     HardBreak,
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Preprocessing helpers
+// ──────────────────────────────────────────────────────────────────
+
+/// CommonMark does not allow bare spaces inside `](url)` link/image destinations.
+/// This function rewrites `](url with spaces)` → `](<url with spaces>)` so that
+/// pulldown-cmark can parse them correctly.  Already angle-bracketed URLs are
+/// left untouched.  Code-span / fenced-code content is skipped to avoid false
+/// positives.
+fn fix_link_urls_with_spaces(md: &str) -> std::borrow::Cow<'_, str> {
+    // Fast path: no bareword link suspects.
+    if !md.contains("](") {
+        return std::borrow::Cow::Borrowed(md);
+    }
+
+    let mut out = String::with_capacity(md.len() + 32);
+    let mut rest = md;
+    let mut modified = false;
+
+    while let Some(idx) = rest.find("](") {
+        // Copy everything up to and including `](`
+        out.push_str(&rest[..idx + 2]);
+        rest = &rest[idx + 2..];
+
+        // Skip if already angle-bracketed or looks like an empty ref `]()`
+        if rest.starts_with('<') || rest.starts_with(')') {
+            continue;
+        }
+
+        // Find the closing `)`. We do a naive scan — safe enough for image
+        // paths that won't contain nested parentheses.
+        if let Some(close) = rest.find(')') {
+            let inner = &rest[..close];   // everything between `(` and `)`
+            if inner.contains(' ') && !inner.starts_with('<') {
+                // Separate optional quoted title at the end:
+                // e.g.  `images/foo bar.png "My Title"`
+                let (url_part, title_part) = split_url_title(inner);
+                out.push('<');
+                out.push_str(url_part.trim_end());
+                out.push('>');
+                if !title_part.is_empty() {
+                    out.push(' ');
+                    out.push_str(title_part);
+                }
+                modified = true;
+            } else {
+                out.push_str(inner);
+            }
+            out.push(')');
+            rest = &rest[close + 1..];
+        }
+    }
+
+    out.push_str(rest);
+    if modified { std::borrow::Cow::Owned(out) } else { std::borrow::Cow::Borrowed(md) }
+}
+
+/// Split `url "title"` or `url 'title'` into `(url, "title")`.
+/// Returns `(full, "")` when there is no title.
+fn split_url_title(s: &str) -> (&'_ str, &'_ str) {
+    let s = s.trim_end();
+    // Check for trailing `"..."` or `'...'`
+    if let Some(q) = s.rfind('"').or_else(|| s.rfind('\'')) {
+        let ch = s.as_bytes()[q] as char;
+        let tail = &s[q..];
+        if tail.starts_with(ch) && tail.ends_with(ch) && tail.len() >= 2 {
+            let before = s[..q].trim_end();
+            if before.contains(' ') || before.is_empty() {
+                // Looks like a real title
+                return (before, tail);
+            }
+        }
+    }
+    (s, "")
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -131,7 +209,8 @@ impl Renderer {
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_GFM;
 
-        let parser = Parser::new_ext(markdown, options);
+        let preprocessed = fix_link_urls_with_spaces(markdown);
+        let parser = Parser::new_ext(&preprocessed, options);
         let mut nodes: Vec<RenderNode> = Vec::new();
 
         // Simple flat state machine — good enough for v1.
@@ -146,6 +225,14 @@ impl Renderer {
         let mut italic = false;
         let mut strikethrough = false;
         let mut underline = false;
+        // List / task list state
+        let mut in_list_item = false;
+        let mut task_list_checked: Option<bool> = None;
+        // Image state
+        let mut in_image = false;
+        let mut image_url = String::new();
+        let mut image_height: f32 = 300.0;
+        let mut image_alt_buf = String::new();
         // Table state
         let mut in_table_cell = false;
         let mut table_headers: Vec<Vec<Inline>> = Vec::new();
@@ -216,8 +303,53 @@ impl Renderer {
                 Event::End(TagEnd::Paragraph) => {
                     in_paragraph = false;
                     if !inline_buf.is_empty() {
-                        nodes.push(RenderNode::Paragraph(inline_buf.clone()));
+                        if in_list_item {
+                            if let Some(checked) = task_list_checked {
+                                nodes.push(RenderNode::TaskListItem { checked, inlines: inline_buf.clone() });
+                            } else {
+                                nodes.push(RenderNode::Paragraph(inline_buf.clone()));
+                            }
+                        } else {
+                            nodes.push(RenderNode::Paragraph(inline_buf.clone()));
+                        }
                         inline_buf.clear();
+                    }
+                }
+
+                // ── List items ────────────────────────────────────
+                // ── Images ───────────────────────────────────────────────────
+                Event::Start(Tag::Image { dest_url, title, .. }) => {
+                    in_image = true;
+                    image_url = dest_url.to_string();
+                    // Parse height from title (stored as integer pixel string e.g. "300")
+                    image_height = title.parse::<f32>().unwrap_or(300.0);
+                    image_alt_buf.clear();
+                }
+                Event::End(TagEnd::Image) => {
+                    if in_image {
+                        let inline = Inline::Image {
+                            alt: image_alt_buf.clone(),
+                            url: image_url.clone(),
+                            height: image_height,
+                        };
+                        if in_paragraph {
+                            inline_buf.push(inline);
+                        }
+                        in_image = false;
+                    }
+                }
+
+                Event::Start(Tag::Item) => {
+                    in_list_item = true;
+                    task_list_checked = None;
+                }
+                Event::End(TagEnd::Item) => {
+                    in_list_item = false;
+                    task_list_checked = None;
+                }
+                Event::TaskListMarker(checked) => {
+                    if in_list_item {
+                        task_list_checked = Some(checked);
                     }
                 }
 
@@ -271,7 +403,9 @@ impl Renderer {
                 // ── Text ──────────────────────────────────────────
                 Event::Text(text) => {
                     let s = text.into_string();
-                    if in_code_block {
+                    if in_image {
+                        image_alt_buf.push_str(&s);
+                    } else if in_code_block {
                         code_buf.push_str(&s);
                     } else if in_table_cell {
                         let inline = if bold {

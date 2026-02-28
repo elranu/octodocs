@@ -21,17 +21,19 @@ impl PreviewPane {
 impl Render for PreviewPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = use_theme();
-        let nodes: Vec<octodocs_core::RenderNode> = self
-            .app_state
-            .read(cx)
+        let state = self.app_state.read(cx);
+        let doc_dir = state.document.path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        let nodes: Vec<octodocs_core::RenderNode> = state
             .blocks
             .iter()
             .map(|b| b.node.clone())
             .collect();
-
         let content: Vec<AnyElement> = nodes
             .iter()
-            .map(|node| render_node(node, &theme))
+            .map(|node| render_node(node, &theme, doc_dir.as_deref()))
             .collect();
 
         div()
@@ -51,7 +53,7 @@ impl Render for PreviewPane {
     }
 }
 
-pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyElement {
+pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme, doc_dir: Option<&std::path::Path>) -> AnyElement {
     match node {
         RenderNode::Heading { level, text } => {
             let element: AnyElement = match level {
@@ -65,6 +67,27 @@ pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyE
         }
 
         RenderNode::Paragraph(inlines) => {
+            // Standalone image paragraph
+            if inlines.len() == 1 {
+                if let Inline::Image { alt, url, .. } = &inlines[0] {
+                    let full_path = doc_dir
+                        .map(|d| d.join(url))
+                        .filter(|p| p.exists())
+                        .unwrap_or_else(|| std::path::PathBuf::from(url));
+                    return div()
+                        .my(px(8.0))
+                        .child(
+                            img(Arc::<std::path::Path>::from(full_path))
+                                .max_w_full()
+                        )
+                        .when(!alt.is_empty(), |d| d.child(
+                            div().text_color(theme.tokens.muted_foreground)
+                                .text_sm()
+                                .child(alt.clone()),
+                        ))
+                        .into_any_element();
+                }
+            }
             let spans: Vec<AnyElement> = inlines
                 .iter()
                 .map(|inline| render_inline(inline, theme))
@@ -118,7 +141,7 @@ pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyE
         RenderNode::BlockQuote(children) => {
             let child_els: Vec<AnyElement> = children
                 .iter()
-                .map(|n| render_node(n, theme))
+                .map(|n| render_node(n, theme, doc_dir))
                 .collect();
 
             div()
@@ -142,7 +165,7 @@ pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyE
                     };
                     let inner: Vec<AnyElement> = item_nodes
                         .iter()
-                        .map(|n| render_node(n, theme))
+                        .map(|n| render_node(n, theme, doc_dir))
                         .collect();
 
                     div()
@@ -160,6 +183,29 @@ pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme) -> AnyE
                 .gap(px(2.0))
                 .my(px(4.0))
                 .children(list_items)
+                .into_any_element()
+        }
+
+        RenderNode::TaskListItem { checked, inlines } => {
+            let spans: Vec<AnyElement> = inlines
+                .iter()
+                .map(|inline| render_inline(inline, theme))
+                .collect();
+            let checkbox = if *checked { "\u{2611}" } else { "\u{2610}" };
+            div()
+                .flex()
+                .gap(px(8.0))
+                .my(px(2.0))
+                .child(
+                    div()
+                        .text_color(if *checked {
+                            theme.tokens.accent
+                        } else {
+                            theme.tokens.muted_foreground
+                        })
+                        .child(body_small(checkbox.to_string())),
+                )
+                .children(spans)
                 .into_any_element()
         }
 

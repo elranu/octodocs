@@ -12,6 +12,9 @@ use octodocs_core::{
     ParagraphKind,
 };
 use std::ops::Range;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::cell::RefCell;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Actions
@@ -141,6 +144,10 @@ pub struct DocumentEditorState {
     /// Active table cell: (row, col) where row=0 is the header row.
     /// Set when the user clicks on a table cell or navigates with Tab.
     pub table_cursor: Option<(usize, usize)>,
+    /// Directory of the currently open document, used to resolve and store images.
+    pub document_dir: Option<PathBuf>,
+    /// Tracks an in-progress image-block resize drag: (para_idx, original_height, drag_start_y).
+    pub image_resize_drag: Option<(usize, f32, f32)>,
 }
 
 impl DocumentEditorState {
@@ -156,6 +163,8 @@ impl DocumentEditorState {
             drag_anchor: None,
             drag_occurred: false,
             table_cursor: None,
+            document_dir: None,
+            image_resize_drag: None,
         }
     }
 
@@ -171,6 +180,7 @@ impl DocumentEditorState {
         self.marked_range = None;
         self.layout_cache.clear();
         self.drag_anchor = None;
+        self.image_resize_drag = None;
         self.drag_occurred = false;
         self.table_cursor = None;
         cx.notify();
@@ -776,6 +786,33 @@ impl DocumentEditorState {
 
     pub fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
+            // Check for an image in the clipboard first.
+            for entry in item.entries() {
+                if let ClipboardEntry::Image(img) = entry {
+                    let ext = match img.format {
+                        ImageFormat::Jpeg => "jpg",
+                        ImageFormat::Gif => "gif",
+                        ImageFormat::Webp => "webp",
+                        _ => "png",
+                    };
+                    let images_dir = self.images_dir();
+                    if std::fs::create_dir_all(&images_dir).is_ok() {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        let filename = format!("clipboard-{ts}.{ext}");
+                        let dest = images_dir.join(&filename);
+                        if std::fs::write(&dest, &img.bytes).is_ok() {
+                            let rel = format!("images/{filename}");
+                            self.insert_image_at_cursor(rel, "image".to_string(), cx);
+                            return;
+                        }
+                    }
+                    break;
+                }
+            }
+            // Fall back to text paste.
             if let Some(text) = item.text() {
                 if self.selection.is_some() {
                     let at = self.delete_selection(cx);
@@ -812,6 +849,45 @@ impl DocumentEditorState {
 
     pub fn toggle_code(&mut self, cx: &mut Context<Self>) {
         self.toggle_format(InlineFormat::Code, cx);
+    }
+
+    /// Toggle the current paragraph between `TaskListItem { checked: false }` and `Paragraph`.
+    pub fn toggle_task_list_item(&mut self, cx: &mut Context<Self>) {
+        let para = &mut self.paragraphs[self.cursor.para_idx];
+        para.kind = match &para.kind {
+            ParagraphKind::TaskListItem { .. } => ParagraphKind::Paragraph,
+            _ => ParagraphKind::TaskListItem { checked: false },
+        };
+        cx.notify();
+    }
+
+    /// Insert an image paragraph after the current cursor position.
+    pub fn insert_image_at_cursor(&mut self, path: String, alt: String, cx: &mut Context<Self>) {
+        let para = DocParagraph {
+            kind: ParagraphKind::Image { path, alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+        };
+        let insert_at = self.cursor.para_idx + 1;
+        self.paragraphs.insert(insert_at, para);
+        self.cursor = DocCursor { para_idx: insert_at, char_offset: 0 };
+        cx.notify();
+    }
+
+    /// Return the images directory for the current document, falling back to a temp dir.
+    fn images_dir(&self) -> PathBuf {
+        self.document_dir
+            .as_ref()
+            .map(|d| d.join("images"))
+            .unwrap_or_else(|| std::env::temp_dir().join("octodocs").join("images"))
+    }
+
+    /// Flip the `checked` state of a `TaskListItem` paragraph (called when user
+    /// clicks on the checkbox area in the WYSIWYG view).
+    pub fn toggle_checked_at_para(&mut self, para_idx: usize, cx: &mut Context<Self>) {
+        if let ParagraphKind::TaskListItem { checked } = &mut self.paragraphs[para_idx].kind {
+            *checked = !*checked;
+            cx.notify();
+        }
     }
 
     fn toggle_format(&mut self, fmt: InlineFormat, cx: &mut Context<Self>) {
@@ -1384,6 +1460,16 @@ const LEFT_MARGIN: f32 = 48.0;
 const TOP_PADDING: f32 = 24.0;
 const PARA_GAP: f32 = 8.0;
 const MERMAID_HEIGHT: f32 = 180.0;
+const IMAGE_BLOCK_DEFAULT_HEIGHT: f32 = 300.0;
+const IMAGE_BLOCK_HEIGHT: f32 = IMAGE_BLOCK_DEFAULT_HEIGHT; // kept for legacy refs
+
+// Per-process image decode cache: path string → decoded BGRA RenderImage.
+// Using thread_local avoids any GPUI state entanglement; images are decoded
+// once on the first paint frame and served from memory thereafter.
+thread_local! {
+    static IMAGE_CACHE: RefCell<std::collections::HashMap<String, Arc<RenderImage>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
 const TABLE_ROW_H: f32 = 28.0;
 const TABLE_CELL_PAD_X: f32 = 8.0;
 const TABLE_CELL_PAD_Y: f32 = 5.0;
@@ -1669,6 +1755,9 @@ impl Element for DocumentEditorElement {
                 ParagraphKind::Mermaid(_) => {
                     total_h += MERMAID_HEIGHT + PARA_GAP;
                 }
+                ParagraphKind::Image { height, .. } => {
+                    total_h += height + PARA_GAP;
+                }
                 ParagraphKind::Table { headers, rows, .. } => {
                     total_h += table_height(headers, rows) + PARA_GAP;
                 }
@@ -1704,6 +1793,7 @@ impl Element for DocumentEditorElement {
             let lh = para_line_height(&para.kind);
             match &para.kind {
                 ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
+                ParagraphKind::Image { height, .. } => total_h += height + PARA_GAP,
                 ParagraphKind::Table { headers, rows, .. } => {
                     total_h += table_height(headers, rows) + PARA_GAP;
                 }
@@ -1820,6 +1910,99 @@ impl Element for DocumentEditorElement {
                     });
                     line_layouts.push(None);
                     current_y += MERMAID_HEIGHT + PARA_GAP;
+                    continue;
+                }
+                ParagraphKind::Image { path, height, .. } => {
+                    let img_height = *height;
+                    let doc_dir = self.state.read(cx).document_dir.clone();
+                    let abs_path = doc_dir
+                        .as_ref()
+                        .map(|d| d.join(path.as_str()))
+                        .unwrap_or_else(|| PathBuf::from(path.as_str()));
+                    let cache_key = abs_path.to_string_lossy().to_string();
+
+                    // Decode image once, cache forever in thread-local storage.
+                    let render_image: Option<Arc<RenderImage>> = IMAGE_CACHE.with(|cache| {
+                        let mut map = cache.borrow_mut();
+                        if let Some(ri) = map.get(&cache_key) {
+                            return Some(ri.clone());
+                        }
+                        let ri = std::fs::read(&abs_path).ok()
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|dyn_img| {
+                                let mut rgba = dyn_img.into_rgba8();
+                                // GPUI requires BGRA: swap R and B channels.
+                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                            });
+                        if let Some(ri) = &ri {
+                            map.insert(cache_key, ri.clone());
+                        }
+                        ri
+                    });
+
+                    let top_screen = bounds.top() + px(current_y);
+                    let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+
+                    if let Some(ri) = render_image {
+                        // Letterbox fit inside the block.
+                        let img_size = ri.size(0);
+                        let iw = img_size.width.0 as f32;
+                        let ih = img_size.height.0 as f32;
+                        if iw > 0.0 && ih > 0.0 {
+                            let scale = (f32::from(block_w) / iw).min(img_height / ih);
+                            let dw = iw * scale;
+                            let dh = ih * scale;
+                            let ox = (f32::from(block_w) - dw) / 2.0;
+                            let oy = (img_height - dh) / 2.0;
+                            let paint_bounds = Bounds::new(
+                                point(left + px(ox), top_screen + px(oy)),
+                                size(px(dw), px(dh)),
+                            );
+                            let _ = window.paint_image(paint_bounds, gpui::Corners::default(), ri, 0, false);
+                        }
+                    } else {
+                        // Placeholder while file is missing/loading.
+                        window.paint_quad(gpui::PaintQuad {
+                            bounds: Bounds::new(point(left, top_screen), size(block_w, px(img_height))),
+                            corner_radii: gpui::Corners::all(px(4.0)),
+                            background: theme.tokens.muted.opacity(0.25).into(),
+                            border_widths: gpui::Edges::all(px(1.0)),
+                            border_color: theme.tokens.border,
+                            border_style: gpui::BorderStyle::Solid,
+                            continuous_corners: false,
+                        });
+                        let filename = std::path::Path::new(path.as_str())
+                            .file_name().map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.clone());
+                        let label = format!("\u{1f5bc}  {filename}");
+                        let label_run = TextRun { len: label.len(), font: base_font.clone(),
+                            color: theme.tokens.muted_foreground, background_color: None,
+                            underline: None, strikethrough: None };
+                        let shaped = window.text_system().shape_line(label.into(), px(13.0), &[label_run], None);
+                        let _ = shaped.paint(point(left + px(8.0), top_screen + px(img_height / 2.0 - 8.0)), px(20.0), window, cx);
+                    }
+
+                    // Resize handle bar at the bottom of the block.
+                    let handle_y = top_screen + px(img_height - 5.0);
+                    let handle_cx = left + block_w * 0.5;
+                    window.paint_quad(fill(
+                        Bounds::new(point(handle_cx - px(24.0), handle_y), size(px(48.0), px(4.0))),
+                        theme.tokens.border.opacity(0.55),
+                    ));
+
+                    visual_lines.push(VisualLine {
+                        para_idx,
+                        char_start: 0,
+                        char_end: 0,
+                        top_px: current_y,
+                        height_px: img_height,
+                        font_size_px,
+                        is_mermaid: false,
+                        glyph_xs: vec![],
+                    });
+                    line_layouts.push(None);
+                    current_y += img_height + PARA_GAP;
                     continue;
                 }
                 ParagraphKind::Table { headers, rows, .. } => {
@@ -2014,10 +2197,54 @@ impl Element for DocumentEditorElement {
                 window.paint_quad(fill(bar, theme.tokens.border));
             }
 
+            // Task list item checkbox
+            if let ParagraphKind::TaskListItem { checked } = kind {
+                let cb_size = px(14.0);
+                let cb_x = left - px(28.0);
+                let cb_y = bounds.top() + px(current_y + (line_height - 14.0) / 2.0);
+                let cb_bounds = Bounds::new(point(cb_x, cb_y), size(cb_size, cb_size));
+                // Draw checkbox border
+                window.paint_quad(
+                    gpui::PaintQuad {
+                        bounds: cb_bounds,
+                        corner_radii: gpui::Corners::all(px(2.0)),
+                        background: if *checked {
+                            theme.tokens.accent.into()
+                        } else {
+                            gpui::Hsla::transparent_black().into()
+                        },
+                        border_widths: gpui::Edges::all(px(1.5)),
+                        border_color: if *checked {
+                            theme.tokens.accent
+                        } else {
+                            theme.tokens.border
+                        },
+                        border_style: gpui::BorderStyle::Solid,
+                        continuous_corners: false,
+                    },
+                );
+                // Draw check mark for checked state (two paint_quad strokes)
+                if *checked {
+                    // Horizontal part of checkmark (bottom stroke)
+                    let h_stroke = Bounds::new(
+                        point(cb_x + px(3.0), cb_y + px(8.0)),
+                        size(px(4.0), px(2.0)),
+                    );
+                    window.paint_quad(fill(h_stroke, gpui::white()));
+                    // Diagonal ascending part
+                    let v_stroke = Bounds::new(
+                        point(cb_x + px(6.0), cb_y + px(4.0)),
+                        size(px(2.0), px(6.0)),
+                    );
+                    window.paint_quad(fill(v_stroke, gpui::white()));
+                }
+            }
+
             // Split paragraph text at '\n' to get visual sub-lines
             let flat = para.plain_text();
             let sublines: Vec<&str> = flat.split('\n').collect();
             let mut char_start = 0usize;
+
 
             for subline in &sublines {
                 let char_count = subline.chars().count();
@@ -2245,6 +2472,51 @@ impl RenderOnce for DocumentEditor {
                 let new_cursor = state.read(cx).cursor_from_point(event.position, bounds);
                 let new_table_cell = state.read(cx).table_cell_from_point(event.position, bounds);
                 let focus = state.read(cx).focus_handle.clone();
+
+                // Detect click on task list item checkbox (drawn in the left margin).
+                // Checkbox area: [left - 28, left - 8] x-range.
+                let cb_left = bounds.left() + px(LEFT_MARGIN - 28.0);
+                let cb_right = bounds.left() + px(LEFT_MARGIN - 8.0);
+                let in_checkbox_zone = event.position.x >= cb_left && event.position.x <= cb_right;
+                if in_checkbox_zone {
+                    let para_idx = new_cursor.para_idx;
+                    let is_task = state.read(cx).paragraphs.get(para_idx)
+                        .map(|p| matches!(p.kind, ParagraphKind::TaskListItem { .. }))
+                        .unwrap_or(false);
+                    if is_task {
+                        state.update(cx, |s, cx| {
+                            s.toggle_checked_at_para(para_idx, cx);
+                        });
+                        window.focus(&focus);
+                        return;
+                    }
+                }
+
+                // Detect click on the image resize handle (4px bar at image block bottom).
+                let resize_info: Option<(usize, f32, f32)> = {
+                    let s = state.read(cx);
+                    let mut found = None;
+                    for vl in &s.layout_cache {
+                        let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
+                        if let ParagraphKind::Image { height, .. } = &para.kind {
+                            let block_bottom = bounds.top() + px(vl.top_px + vl.height_px);
+                            if event.position.y >= block_bottom - px(12.0) && event.position.y <= block_bottom + px(4.0) {
+                                found = Some((vl.para_idx, *height, event.position.y.into()));
+                                break;
+                            }
+                        }
+                    }
+                    found
+                };
+                if let Some((para_idx, orig_h, start_y)) = resize_info {
+                    state.update(cx, |s, cx| {
+                        s.image_resize_drag = Some((para_idx, orig_h, start_y));
+                        cx.notify();
+                    });
+                    window.focus(&focus);
+                    return;
+                }
+
                 state.update(cx, |s, cx| {
                     s.cursor = new_cursor;
                     s.table_cursor = new_table_cell;
@@ -2266,6 +2538,23 @@ impl RenderOnce for DocumentEditor {
                 // detection can be unreliable on some Linux compositors.
                 // drag_anchor is only Some when on_mouse_down already fired, so this
                 // is definitively a left-button drag gesture.
+
+                // Handle image resize drag.
+                let resize_drag = state_move.read(cx).image_resize_drag;
+                if let Some((para_idx, orig_h, start_y)) = resize_drag {
+                    let delta: f32 = f32::from(event.position.y) - start_y;
+                    let new_h = (orig_h + delta).max(60.0);
+                    state_move.update(cx, |s, cx| {
+                        if let Some(para) = s.paragraphs.get_mut(para_idx) {
+                            if let ParagraphKind::Image { ref mut height, .. } = para.kind {
+                                *height = new_h;
+                            }
+                        }
+                        cx.notify();
+                    });
+                    return;
+                }
+
                 let (bounds, drag_anchor) = {
                     let s = state_move.read(cx);
                     (s.last_bounds.unwrap_or_default(), s.drag_anchor)
@@ -2287,6 +2576,11 @@ impl RenderOnce for DocumentEditor {
             .on_mouse_up(MouseButton::Left, move |event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
                 let _ = event;
                 state_up.update(cx, |s, cx| {
+                    // Clear image resize drag on mouse up.
+                    if s.image_resize_drag.take().is_some() {
+                        cx.notify();
+                        return;
+                    }
                     // Plain click clears selection; completed drag preserves it.
                     if !s.drag_occurred {
                         s.selection = None;
@@ -2296,6 +2590,40 @@ impl RenderOnce for DocumentEditor {
                     cx.notify();
                 });
             });
+
+        // ── File drag-and-drop ─────────────────────────────────────────────
+        let state_drop = self.state.clone();
+        base = base.on_drop::<ExternalPaths>(move |paths: &ExternalPaths, _window: &mut Window, cx: &mut App| {
+            const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
+            let doc_dir_opt = state_drop.read(cx).document_dir.clone();
+            for src in paths.paths() {
+                let ext_lc = src.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_lowercase())
+                    .unwrap_or_default();
+                if !IMAGE_EXTS.contains(&ext_lc.as_str()) {
+                    continue;
+                }
+                let images_dir = match &doc_dir_opt {
+                    Some(d) => d.join("images"),
+                    None => std::env::temp_dir().join("octodocs").join("images"),
+                };
+                if std::fs::create_dir_all(&images_dir).is_err() {
+                    continue;
+                }
+                let Some(filename) = src.file_name() else { continue; };
+                let safe_name = filename.to_string_lossy().replace(' ', "_");
+                let dest = images_dir.join(&safe_name);
+                if std::fs::copy(src, &dest).is_err() {
+                    continue;
+                }
+                let rel = format!("images/{}", safe_name);
+                let alt = src.file_stem()
+                    .map(|s| s.to_string_lossy().replace(' ', "_"))
+                    .unwrap_or_default();
+                let _ = state_drop.update(cx, |s, cx| s.insert_image_at_cursor(rel, alt, cx));
+            }
+        });
 
         if self.show_border {
             base = base.border_1().border_color(theme.tokens.border).rounded(theme.tokens.radius_md);

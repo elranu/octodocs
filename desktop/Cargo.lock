@@ -113,6 +113,7 @@ dependencies = [
  "adabraka-gpui",
  "bytes",
  "futures",
+ "image",
  "isahc",
  "octodocs-core",
  "once_cell",

@@ -257,7 +257,8 @@ impl GithubSidebar {
 
                 if !is_dir {
                     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-                    if extension != "md" {
+                    const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
+                    if extension != "md" && !IMAGE_EXTS.contains(&extension.as_str()) {
                         return None;
                     }
                 }
@@ -398,9 +399,18 @@ impl GithubSidebar {
                             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                 let _ = row_weak.update(cx, |sidebar, cx| {
                                     sidebar.selected_file = Some(path_for_left.clone());
-                                    sidebar.app_state.update(cx, |state, cx| {
-                                        state.open_file_from_sidebar(path_for_left.clone(), cx);
-                                    });
+                                    let ext = path_for_left
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .map(|e| e.to_ascii_lowercase())
+                                        .unwrap_or_default();
+                                    if ext == "md" {
+                                        sidebar.app_state.update(cx, |state, cx| {
+                                            state.open_file_from_sidebar(path_for_left.clone(), cx);
+                                        });
+                                    } else {
+                                        cx.notify();
+                                    }
                                 });
                             })
                             .on_mouse_down(gpui::MouseButton::Right, move |event, _, cx| {

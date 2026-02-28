@@ -127,6 +127,51 @@ pub fn push_file(
     Ok(update.commit.sha)
 }
 
+pub fn push_binary_file(
+    token: &str,
+    config: &GitHubSyncConfig,
+    filename: &str,
+    content: &[u8],
+) -> Result<String> {
+    let client = client::build(token)?;
+    let path = build_repo_path(config, filename);
+    let url = format!(
+        "{API_BASE}/repos/{}/{}/contents/{}",
+        config.owner, config.repo, path
+    );
+    let message = format!("OctoDocs: update {filename}");
+
+    let existing_sha = get_file_sha(token, config, filename)?;
+
+    let body = CreateUpdateFileRequest {
+        message: &message,
+        content: base64::engine::general_purpose::STANDARD.encode(content),
+        branch: &config.branch,
+        sha: existing_sha.as_deref(),
+    };
+
+    let response = client
+        .put(&url)
+        .json(&body)
+        .send()
+        .with_context(|| {
+            format!(
+                "Failed to push binary '{path}' to {}/{}#{}",
+                config.owner, config.repo, config.branch
+            )
+        })?
+        .error_for_status()
+        .with_context(|| {
+            format!("GitHub returned error while pushing binary '{path}'")
+        })?;
+
+    let update: FileUpdateResponse = response
+        .json()
+        .with_context(|| format!("Failed to parse push response for '{path}'"))?;
+
+    Ok(update.commit.sha)
+}
+
 pub fn delete_file(token: &str, config: &GitHubSyncConfig, filename: &str) -> Result<Option<String>> {
     let Some(existing_sha) = get_file_sha(token, config, filename)? else {
         return Ok(None);
