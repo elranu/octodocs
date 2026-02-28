@@ -137,6 +137,10 @@ pub struct AppState {
     _autosave_task: Option<Task<()>>,
     /// Background task that polls the system for dark/light mode changes (Linux).
     _theme_watcher_task: Option<Task<()>>,
+    /// Whether the Insert Link dialog is visible.
+    pub insert_link_modal_open: bool,
+    /// Pre-filled text for the Insert Link dialog (copied from the current selection).
+    pub insert_link_prefill_text: String,
 }
 
 impl AppState {
@@ -368,6 +372,8 @@ impl AppState {
             is_dark: initial_is_dark,
             _autosave_task: None,
             _theme_watcher_task: None,
+            insert_link_modal_open: false,
+            insert_link_prefill_text: String::new(),
             _import_summary_version: 0,
             _sync_task: None,
             _pull_task: None,

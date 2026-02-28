@@ -231,7 +231,7 @@ impl DocumentEditorState {
                 continue;
             }
             if let Some(last) = merged.last_mut() {
-                if last.format == span.format {
+                if last.format == span.format && last.link_url == span.link_url {
                     last.text.push_str(&span.text);
                     continue;
                 }
@@ -243,6 +243,7 @@ impl DocumentEditorState {
             merged.push(InlineSpan {
                 text: String::new(),
                 format: InlineFormat::Plain,
+                link_url: None,
             });
         }
         *spans = merged;
@@ -275,11 +276,13 @@ impl DocumentEditorState {
                 right.push(InlineSpan {
                     text: span.text.clone(),
                     format: span.format,
+                    link_url: span.link_url.clone(),
                 });
             } else if at >= span_end {
                 left.push(InlineSpan {
                     text: span.text.clone(),
                     format: span.format,
+                    link_url: span.link_url.clone(),
                 });
             } else {
                 let split_at = at - span_start;
@@ -288,12 +291,14 @@ impl DocumentEditorState {
                     left.push(InlineSpan {
                         text: before,
                         format: span.format,
+                        link_url: span.link_url.clone(),
                     });
                 }
                 if !after.is_empty() {
                     right.push(InlineSpan {
                         text: after,
                         format: span.format,
+                        link_url: span.link_url.clone(),
                     });
                 }
             }
@@ -318,10 +323,13 @@ impl DocumentEditorState {
             .map(|s| s.format)
             .or_else(|| right.first().map(|s| s.format))
             .unwrap_or(InlineFormat::Plain);
+        // Do not propagate Link format when typing — new characters should be Plain.
+        let insertion_format = if insertion_format == InlineFormat::Link { InlineFormat::Plain } else { insertion_format };
 
         left.push(InlineSpan {
             text: text.to_string(),
             format: insertion_format,
+            link_url: None,
         });
         left.append(&mut right);
         Self::merge_adjacent_spans(&mut left);
@@ -347,7 +355,7 @@ impl DocumentEditorState {
     }
 
     /// Get selected text as a String (or empty if no selection).
-    fn selected_text(&self) -> String {
+    pub fn selected_text(&self) -> String {
         let Some(sel) = self.selection else { return String::new(); };
         let (start, end) = sel.ordered();
         if start.para_idx == end.para_idx {
@@ -369,6 +377,32 @@ impl DocumentEditorState {
             s.extend(last_flat.chars().take(end.char_offset));
             s
         }
+    }
+
+    /// Insert (or replace selection with) a hyperlink span.
+    pub fn insert_link(&mut self, text: String, url: String, cx: &mut Context<Self>) {
+        // Delete selection first (single-paragraph only)
+        if let Some(sel) = self.selection {
+            let (start, end) = sel.ordered();
+            if start.para_idx == end.para_idx {
+                let count = end.char_offset - start.char_offset;
+                let new_cursor = self.do_delete_chars(start, count);
+                self.cursor = new_cursor;
+            }
+            self.selection = None;
+        }
+        let at = self.cursor;
+        let para = &mut self.paragraphs[at.para_idx];
+        let (mut left, mut right) = Self::split_spans_at_char(&para.spans, at.char_offset);
+        left.push(InlineSpan { text: text.clone(), format: InlineFormat::Link, link_url: Some(url) });
+        left.append(&mut right);
+        Self::merge_adjacent_spans(&mut left);
+        para.spans = left;
+        self.cursor = DocCursor {
+            para_idx: at.para_idx,
+            char_offset: at.char_offset + text.chars().count(),
+        };
+        cx.notify();
     }
 
     /// Delete the current selection, return new cursor position (at selection start).
@@ -876,7 +910,7 @@ impl DocumentEditorState {
     pub fn insert_image_at_cursor(&mut self, path: String, alt: String, cx: &mut Context<Self>) {
         let para = DocParagraph {
             kind: ParagraphKind::Image { path, alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
-            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
         };
         let insert_at = self.cursor.para_idx + 1;
         self.paragraphs.insert(insert_at, para);
@@ -953,7 +987,7 @@ impl DocumentEditorState {
                 if end_clip > span_start {
                     let text: String = flat.chars().skip(span_start).take(end_clip - span_start).collect();
                     if !text.is_empty() {
-                        new_spans.push(InlineSpan { text, format: span.format });
+                        new_spans.push(InlineSpan { text, format: span.format, link_url: span.link_url.clone() });
                     }
                 }
             }
@@ -965,7 +999,7 @@ impl DocumentEditorState {
                 let text: String = flat.chars().skip(overlap_start).take(overlap_end - overlap_start).collect();
                 if !text.is_empty() {
                     let new_fmt = if has_non_fmt { fmt } else { InlineFormat::Plain };
-                    new_spans.push(InlineSpan { text, format: new_fmt });
+                    new_spans.push(InlineSpan { text, format: new_fmt, link_url: None });
                 }
             }
 
@@ -975,7 +1009,7 @@ impl DocumentEditorState {
                 if start_clip < span_end {
                     let text: String = flat.chars().skip(start_clip).take(span_end - start_clip).collect();
                     if !text.is_empty() {
-                        new_spans.push(InlineSpan { text, format: span.format });
+                        new_spans.push(InlineSpan { text, format: span.format, link_url: span.link_url.clone() });
                     }
                 }
             }
@@ -1005,7 +1039,7 @@ impl DocumentEditorState {
         ];
         let para = DocParagraph {
             kind: ParagraphKind::Table { source, headers, rows },
-            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
         };
         let insert_at = self.cursor.para_idx + 1;
         self.paragraphs.insert(insert_at, para);
@@ -1550,7 +1584,7 @@ fn coalesce_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
             continue;
         }
         if let Some(last) = merged.last_mut() {
-            if last.format == span.format {
+            if last.format == span.format && last.link_url == span.link_url {
                 last.text.push_str(&span.text);
                 continue;
             }
@@ -1559,7 +1593,7 @@ fn coalesce_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
     }
 
     if merged.is_empty() {
-        vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }]
+        vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }]
     } else {
         merged
     }
@@ -1633,6 +1667,7 @@ fn span_font(format: InlineFormat, base_font: &Font, mono_font_family: &SharedSt
             style: FontStyle::Normal,
             ..base_font.clone()
         },
+        InlineFormat::Link => base_font.clone(),
     }
 }
 
@@ -1680,11 +1715,17 @@ fn spans_to_text_runs(
         let color = match span.format {
             InlineFormat::Code => code_color,
             InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
+            InlineFormat::Link => emphasis_color,
             InlineFormat::Plain => base_color,
         };
 
         let underline = match span.format {
             InlineFormat::Underline => Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(emphasis_color),
+                wavy: false,
+            }),
+            InlineFormat::Link => Some(UnderlineStyle {
                 thickness: px(1.0),
                 color: Some(emphasis_color),
                 wavy: false,
