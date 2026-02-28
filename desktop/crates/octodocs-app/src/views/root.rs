@@ -1,6 +1,3 @@
-use std::cell::Cell;
-use std::rc::Rc;
-
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
@@ -30,7 +27,7 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(cx: &mut Context<Self>, initial_is_dark: bool) -> Self {
-        let app_state = cx.new(AppState::new);
+        let app_state = cx.new(|cx| AppState::new_with(cx, initial_is_dark));
         let document_editor_pane = cx.new(|_| DocumentEditorPane::new(app_state.clone()));
         let editor_pane = cx.new(|_| EditorPane::new(app_state.clone()));
         let preview_pane = cx.new(|_| PreviewPane::new(app_state.clone()));
@@ -213,15 +210,17 @@ impl RootView {
             });
         };
 
-        let is_dark = Rc::new(Cell::new(initial_is_dark));
-        let is_dark_toggle = is_dark.clone();
+        let aw = app_weak.clone();
         let theme_h = move |_w: &mut Window, cx: &mut App| {
-            if is_dark_toggle.get() {
-                install_theme(cx, Theme::light());
-            } else {
-                install_theme(cx, Theme::dark());
-            }
-            is_dark_toggle.set(!is_dark_toggle.get());
+            let _ = aw.update(cx, |state, cx| {
+                state.is_dark = !state.is_dark;
+                if state.is_dark {
+                    install_theme(cx, Theme::dark());
+                } else {
+                    install_theme(cx, Theme::light());
+                }
+                cx.notify();
+            });
         };
 
         let github_auth_modal_weak = github_auth_modal.downgrade();

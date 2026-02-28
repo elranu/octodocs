@@ -99,6 +99,7 @@ pub fn help_menu() -> AppMenu {
 }
 
 pub struct StandardMacMenuBar {
+    #[allow(dead_code)]
     app_name: SharedString,
     file_menu: Option<AppMenu>,
     edit_menu: Option<AppMenu>,

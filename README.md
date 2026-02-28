@@ -14,9 +14,11 @@ OctoDocs is that tool. It's a native desktop Markdown editor built for **everyon
 
 - **WYSIWYG Markdown editing** — You write in a single continuous editor surface (Word/Docs-style). Headings, bold, italic, code, underline, and strikethrough are rendered in real time with no raw syntax visible while editing.
 - **GitHub sync on every save** — Press Ctrl+S and your document is pushed to GitHub automatically. No staging, committing, or pushing. Just save.
+- **Auto-save every minute** — OctoDocs saves your work to disk automatically every 60 seconds so you never lose a change, even if you forget to press Ctrl+S.
 - **File explorer sidebar** — Browse and manage all your Markdown files in a tree view. Create files and folders. Rename them. Everything syncs.
 - **Mermaid diagrams** — Write Mermaid diagram code blocks and see them rendered as full-color images inline, no external tools required.
 - **Multi-repo support** — Connect multiple GitHub repositories. Each local folder maps to a repo/branch/folder.
+- **System theme aware** — Follows your OS dark/light mode on startup and adjusts in real time when you switch. The moon button lets you override any time.
 - **First-run onboarding** — On first launch, the app walks you through GitHub login and repo selection. No example files, no configuration screens. You're writing in 60 seconds.
 
 ## Who Is This For
@@ -155,12 +157,13 @@ OctoDocs is in active development. Here's what's working:
 - [x] Mermaid diagram rendering (flowcharts, sequence diagrams, etc.)
 - [x] GitHub OAuth device flow authentication
 - [x] Auto-push to GitHub on every save
+- [x] Auto-save every 60 seconds (no lost work)
 - [x] File explorer sidebar with create file/folder
 - [x] File rename with GitHub sync
 - [x] Multi-repo bindings with folder-level granularity
 - [x] First-run onboarding with initial file import
 - [x] Subfolder-aware sync (preserves directory structure)
-- [x] Light/dark theme (follows system preference)
+- [x] Light/dark theme (follows system preference, reacts to OS changes in real time)
 - [x] Contextual sync status badge
 
 ### Planned
