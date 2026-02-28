@@ -236,8 +236,8 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
             // Detect a standalone image paragraph (single Inline::Image)
             if inlines.len() == 1 {
                 if let Inline::Image { alt, url, height } = &inlines[0] {
-                        return vec![DocParagraph {
-                            kind: ParagraphKind::Image { path: url.clone(), alt: alt.clone(), height: *height },
+                    return vec![DocParagraph {
+                        kind: ParagraphKind::Image { path: url.clone(), alt: alt.clone(), height: *height },
                         spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
                     }];
                 }
@@ -555,5 +555,60 @@ mod tests {
         let mut para = DocParagraph::empty();
         para.spans[0].text = "hello".to_string();
         assert_eq!(para.char_count(), 5);
+    }
+
+    #[test]
+    fn image_roundtrip() {
+        let md = "![alt text](images/photo.png)\n";
+        let out = roundtrip(md);
+        assert!(out.contains("![alt text](images/photo.png)"), "got: {out}");
+    }
+
+    #[test]
+    fn image_height_roundtrip() {
+        // Non-default height is stored as a quoted numeric title.
+        let md = "![alt](images/photo.png \"450\")\n";
+        let out = roundtrip(md);
+        assert!(
+            out.contains("![alt](images/photo.png \"450\")"),
+            "expected height preserved in title, got: {out}"
+        );
+    }
+
+    #[test]
+    fn image_default_height_not_stored_in_title() {
+        // At the default 300px height the title should be omitted entirely.
+        let md = "![alt](images/photo.png)\n";
+        let out = roundtrip(md);
+        // Must NOT contain a " "300" " suffix.
+        assert!(
+            !out.contains("\"300\""),
+            "default height should not appear in serialised output, got: {out}"
+        );
+    }
+
+    #[test]
+    fn task_list_checked_roundtrip() {
+        let md = "- [x] Done task\n";
+        let out = roundtrip(md);
+        assert!(out.contains("- [x] Done task"), "got: {out}");
+    }
+
+    #[test]
+    fn task_list_unchecked_roundtrip() {
+        let md = "- [ ] Todo task\n";
+        let out = roundtrip(md);
+        assert!(out.contains("- [ ] Todo task"), "got: {out}");
+    }
+
+    #[test]
+    fn fix_link_urls_with_spaces_roundtrip() {
+        // Images with spaces in filenames should survive a parse → serialize round-trip.
+        let md = "![my photo](images/my photo.png)\n";
+        let out = roundtrip(md);
+        // After round-trip the path will have the space (the serialiser writes the
+        // clean path back; spaces in the original are normalised by copy_image_to_images_dir
+        // before insertion, but the parser must at least survive without panicking).
+        assert!(!out.is_empty(), "round-trip produced empty output for spaced URL");
     }
 }

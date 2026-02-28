@@ -191,6 +191,9 @@ impl DocumentEditorState {
         self.hovered_image_para = None;
         self.drag_occurred = false;
         self.table_cursor = None;
+        // Evict the image decode cache when loading a new document so stale
+        // bitmaps (e.g. images deleted or replaced on disk) are not shown.
+        IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
         cx.notify();
     }
 
@@ -2664,7 +2667,7 @@ impl RenderOnce for DocumentEditor {
 
                 // Track which image block (if any) the cursor is hovering over.
                 {
-                    let (bounds, new_hovered) = {
+                    let new_hovered = {
                         let s = state_move.read(cx);
                         let b = s.last_bounds.unwrap_or_default();
                         let mut found = None;
@@ -2681,16 +2684,20 @@ impl RenderOnce for DocumentEditor {
                                 }
                             }
                         }
-                        (b, found)
+                        found
                     };
-                    let _ = bounds;
                     let prev = state_move.read(cx).hovered_image_para;
                     if prev != new_hovered {
                         state_move.update(cx, |s, cx| {
                             s.hovered_image_para = new_hovered;
                             cx.notify();
                         });
-                        return;
+                        // Only short-circuit when not dragging text; during a drag,
+                        // we still need to update the selection in this same event.
+                        let drag_anchor = state_move.read(cx).drag_anchor;
+                        if drag_anchor.is_none() {
+                            return;
+                        }
                     }
                 }
 

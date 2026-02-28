@@ -121,19 +121,21 @@ fn fix_link_urls_with_spaces(md: &str) -> std::borrow::Cow<'_, str> {
     if modified { std::borrow::Cow::Owned(out) } else { std::borrow::Cow::Borrowed(md) }
 }
 
-/// Split `url "title"` or `url 'title'` into `(url, "title")`.
-/// Returns `(full, "")` when there is no title.
+/// Split `url "title"` or `url 'title'` into `(url, title_with_quotes)`.
+/// Returns `(full, "")` when there is no quoted title.
 fn split_url_title(s: &str) -> (&'_ str, &'_ str) {
     let s = s.trim_end();
-    // Check for trailing `"..."` or `'...'`
-    if let Some(q) = s.rfind('"').or_else(|| s.rfind('\'')) {
-        let ch = s.as_bytes()[q] as char;
-        let tail = &s[q..];
-        if tail.starts_with(ch) && tail.ends_with(ch) && tail.len() >= 2 {
-            let before = s[..q].trim_end();
-            if before.contains(' ') || before.is_empty() {
-                // Looks like a real title
-                return (before, tail);
+    // A CommonMark link title is a quoted string preceded by at least one space.
+    // Strategy: find the last space, then check if everything after it is a
+    // quoted string with matching delimiters.
+    if let Some(space) = s.rfind(' ') {
+        let url_part = &s[..space];
+        let title_part = s[space + 1..].trim();
+        if title_part.len() >= 2 {
+            let first = title_part.as_bytes()[0] as char;
+            let last = title_part.as_bytes()[title_part.len() - 1] as char;
+            if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+                return (url_part, &s[space + 1..]);
             }
         }
     }
@@ -316,13 +318,21 @@ impl Renderer {
                     }
                 }
 
-                // ── List items ────────────────────────────────────
                 // ── Images ───────────────────────────────────────────────────
                 Event::Start(Tag::Image { dest_url, title, .. }) => {
                     in_image = true;
                     image_url = dest_url.to_string();
-                    // Parse height from title (stored as integer pixel string e.g. "300")
-                    image_height = title.parse::<f32>().unwrap_or(300.0);
+                    // Only treat the title as a height override if it looks like a
+                    // numeric value (e.g. "300" or "250.5"). Real captions such as
+                    // "Eiffel Tower at night" are left untouched and height stays at
+                    // the default 300px.
+                    image_height = 300.0;
+                    let title_str = title.trim();
+                    if !title_str.is_empty()
+                        && title_str.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    {
+                        image_height = title_str.parse::<f32>().unwrap_or(300.0);
+                    }
                     image_alt_buf.clear();
                 }
                 Event::End(TagEnd::Image) => {
@@ -344,6 +354,16 @@ impl Renderer {
                     task_list_checked = None;
                 }
                 Event::End(TagEnd::Item) => {
+                    // Tight list items (no blank line between items) do not emit
+                    // a Start/End(Paragraph) wrapper, so we flush inline_buf here.
+                    if !inline_buf.is_empty() {
+                        if let Some(checked) = task_list_checked {
+                            nodes.push(RenderNode::TaskListItem { checked, inlines: inline_buf.clone() });
+                        } else {
+                            nodes.push(RenderNode::Paragraph(inline_buf.clone()));
+                        }
+                        inline_buf.clear();
+                    }
                     in_list_item = false;
                     task_list_checked = None;
                 }
@@ -420,7 +440,7 @@ impl Renderer {
                         table_cell_buf.push(inline);
                     } else if in_heading.is_some() {
                         heading_text.push_str(&s);
-                    } else if in_paragraph {
+                    } else if in_paragraph || in_list_item {
                         let inline = if bold {
                             Inline::Bold(s)
                         } else if italic {
@@ -629,6 +649,79 @@ mod tests {
             assert_eq!(r0c1, "30");
         } else {
             panic!("expected RenderNode::Table, got: {:?}", tree.0);
+        }
+    }
+
+    #[test]
+    fn parses_standalone_image() {
+        let tree = Renderer::parse("![alt text](images/photo.png)\n");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(matches!(
+                &inlines[0],
+                Inline::Image { alt, url, height }
+                    if alt == "alt text" && url == "images/photo.png" && (*height - 300.0).abs() < 1.0
+            ), "got: {:?}", inlines);
+        } else {
+            panic!("expected paragraph with image, got: {:?}", tree.0);
+        }
+    }
+
+    #[test]
+    fn parses_image_with_numeric_title_as_height() {
+        let tree = Renderer::parse("![photo](images/photo.png \"450\")\n");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(matches!(
+                &inlines[0],
+                Inline::Image { height, .. } if (*height - 450.0).abs() < 1.0
+            ), "expected height 450, got: {:?}", inlines);
+        } else {
+            panic!("expected paragraph with image");
+        }
+    }
+
+    #[test]
+    fn parses_image_with_non_numeric_title_uses_default_height() {
+        // A real caption must NOT be interpreted as a pixel height.
+        let tree = Renderer::parse("![photo](images/photo.png \"Eiffel Tower at night\")\n");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(matches!(
+                &inlines[0],
+                Inline::Image { height, .. } if (*height - 300.0).abs() < 1.0
+            ), "expected default height 300, got: {:?}", inlines);
+        } else {
+            panic!("expected paragraph with image");
+        }
+    }
+
+    #[test]
+    fn parses_task_list_item_checked() {
+        let tree = Renderer::parse("- [x] Done\n");
+        assert!(matches!(
+            &tree.0[0],
+            RenderNode::TaskListItem { checked: true, .. }
+        ), "got: {:?}", tree.0);
+    }
+
+    #[test]
+    fn parses_task_list_item_unchecked() {
+        let tree = Renderer::parse("- [ ] Todo\n");
+        assert!(matches!(
+            &tree.0[0],
+            RenderNode::TaskListItem { checked: false, .. }
+        ), "got: {:?}", tree.0);
+    }
+
+    #[test]
+    fn fix_link_urls_with_spaces_rewrites_spaced_url() {
+        // Image URL with a space should be parseable after preprocessing.
+        let tree = Renderer::parse("![alt](images/my photo.png)\n");
+        if let RenderNode::Paragraph(inlines) = &tree.0[0] {
+            assert!(
+                inlines.iter().any(|i| matches!(i, Inline::Image { .. })),
+                "expected image inline after space-URL fix, got: {:?}", inlines
+            );
+        } else {
+            panic!("expected paragraph with image after space-URL preprocessing");
         }
     }
 }

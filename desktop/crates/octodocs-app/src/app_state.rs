@@ -24,11 +24,7 @@ fn doc_images_dir(doc_path: Option<&Path>) -> PathBuf {
     doc_path
         .and_then(|p| p.parent())
         .map(|d| d.to_path_buf())
-        .unwrap_or_else(|| {
-            dirs::cache_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join("octodocs")
-        })
+        .unwrap_or_else(|| std::env::temp_dir().join("octodocs"))
         .join("images")
 }
 
