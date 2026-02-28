@@ -293,7 +293,7 @@ impl AppState {
             let nav = this.doc_editor.update(cx, |ed, _| ed.navigate_request.take());
             if let Some(path_str) = nav {
                 let path = std::path::PathBuf::from(&path_str);
-                this.open_file_from_sidebar(path, cx);
+                this.open_file_from_link(path, cx);
                 return;
             }
 
@@ -603,6 +603,28 @@ impl AppState {
 
         // Non-dirty (including re-opening the same file): pull from GitHub then load.
         self.pull_and_open_file(path, cx);
+    }
+
+    /// Open a local .md file immediately from disk without a GitHub pull.
+    /// Used for in-editor link navigation where instant feedback matters.
+    pub fn open_file_from_link(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        if self.dirty {
+            self.pending_open_path = Some(path);
+            self.show_unsaved_prompt = true;
+            cx.notify();
+            return;
+        }
+        // Read the file on the background executor so the UI thread is never blocked.
+        self._pull_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { octodocs_core::FileIo::open(&path) })
+                .await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(doc) => state.load_document(doc, cx),
+                Err(e) => eprintln!("Link navigation error: {e}"),
+            });
+        }));
     }
 
     /// Fetch the latest version of `path` from GitHub (if a sync binding and token exist),
