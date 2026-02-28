@@ -289,6 +289,14 @@ impl AppState {
 
         // When the doc_editor changes (WYSIWYG mode), sync markdown back to document.
         let doc_editor_sub = cx.observe(&doc_editor, |this, _, cx| {
+            // Consume any in-app .md navigation request set by a link click.
+            let nav = this.doc_editor.update(cx, |ed, _| ed.navigate_request.take());
+            if let Some(path_str) = nav {
+                let path = std::path::PathBuf::from(&path_str);
+                this.open_file_from_sidebar(path, cx);
+                return;
+            }
+
             // Skip if this notification came from load_document, not from the user.
             if this.loading_doc > 0 {
                 this.loading_doc -= 1;

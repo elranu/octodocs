@@ -152,6 +152,11 @@ pub struct DocumentEditorState {
     pub image_zoom: Option<PathBuf>,
     /// Index of the image paragraph the mouse is currently hovering over (for magnifier badge).
     pub hovered_image_para: Option<usize>,
+    /// Whether the mouse is hovering a link span (drives pointer cursor).
+    pub hovered_link: bool,
+    /// Set to Some(path) by a link click on a local .md file; the host app should
+    /// consume this in its doc_editor observer and navigate to that document.
+    pub navigate_request: Option<String>,
 }
 
 impl DocumentEditorState {
@@ -171,6 +176,8 @@ impl DocumentEditorState {
             image_resize_drag: None,
             image_zoom: None,
             hovered_image_para: None,
+            hovered_link: false,
+            navigate_request: None,
         }
     }
 
@@ -1809,7 +1816,7 @@ fn spans_to_text_runs(
         let color = match span.format {
             InlineFormat::Code => code_color,
             InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
-            InlineFormat::Link => emphasis_color,
+            InlineFormat::Link => blue(),
             InlineFormat::Plain => base_color,
         };
 
@@ -1821,7 +1828,7 @@ fn spans_to_text_runs(
             }),
             InlineFormat::Link => Some(UnderlineStyle {
                 thickness: px(1.0),
-                color: Some(emphasis_color),
+                color: Some(blue()),
                 wavy: false,
             }),
             _ => None,
@@ -1932,23 +1939,25 @@ impl Element for DocumentEditorElement {
         _window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let state = self.state.read(cx);
-        let mut total_h = TOP_PADDING;
-        for para in &state.paragraphs {
-            let lh = para_line_height(&para.kind);
-            match &para.kind {
-                ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
-                ParagraphKind::Image { height, .. } => total_h += height + PARA_GAP,
-                ParagraphKind::Table { headers, rows, .. } => {
-                    total_h += table_height(headers, rows) + PARA_GAP;
-                }
-                _ => {
-                    let text = para.plain_text();
-                    let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
-                    total_h += lh * line_count as f32 + PARA_GAP;
+        let (total_h, _) = {
+            let state = self.state.read(cx);
+            let mut total_h = TOP_PADDING;            for para in &state.paragraphs {
+                let lh = para_line_height(&para.kind);
+                match &para.kind {
+                    ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
+                    ParagraphKind::Image { height, .. } => total_h += height + PARA_GAP,
+                    ParagraphKind::Table { headers, rows, .. } => {
+                        total_h += table_height(headers, rows) + PARA_GAP;
+                    }
+                    _ => {
+                        let text = para.plain_text();
+                        let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
+                        total_h += lh * line_count as f32 + PARA_GAP;
+                    }
                 }
             }
-        }
+            (total_h, state.hovered_link)
+        };
 
         let _ = total_h;
         EditorPrepaintState
@@ -1965,6 +1974,14 @@ impl Element for DocumentEditorElement {
         cx: &mut App,
     ) {
         let focus_handle = self.state.read(cx).focus_handle.clone();
+
+        // Set pointer cursor when hovering a link span (must be called during paint).
+        let hovered_link = self.state.read(cx).hovered_link;
+        window.set_window_cursor_style(if hovered_link {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::default()
+        });
 
         // Register input handler (must happen in paint)
         window.handle_input(
@@ -2800,6 +2817,27 @@ impl RenderOnce for DocumentEditor {
                     return;
                 }
 
+                // Track link hover for pointer cursor.
+                {
+                    let new_hovered_link = {
+                        let s = state_move.read(cx);
+                        if !s.layout_cache.is_empty() {
+                            let b = s.last_bounds.unwrap_or_default();
+                            let hover_cursor = s.cursor_from_point(event.position, b);
+                            s.link_url_at_offset(hover_cursor.para_idx, hover_cursor.char_offset).is_some()
+                        } else {
+                            false
+                        }
+                    };
+                    let prev_link = state_move.read(cx).hovered_link;
+                    if prev_link != new_hovered_link {
+                        state_move.update(cx, |s, cx| {
+                            s.hovered_link = new_hovered_link;
+                            cx.notify();
+                        });
+                    }
+                }
+
                 // Track which image block (if any) the cursor is hovering over.
                 {
                     let new_hovered = {
@@ -2865,16 +2903,16 @@ impl RenderOnce for DocumentEditor {
                     // Plain click (no drag): open link if the cursor landed on a Link span.
                     if !s.drag_occurred {
                         if let Some(url) = s.link_url_at_offset(s.cursor.para_idx, s.cursor.char_offset) {
-                            let resolved = if url.starts_with("http://") || url.starts_with("https://") {
-                                url
+                            if url.starts_with("http://") || url.starts_with("https://") {
+                                open_url(&url);
                             } else {
-                                // Relative .md path — resolve against document directory.
-                                s.document_dir
+                                // Local .md link — ask the host app to navigate.
+                                let resolved = s.document_dir
                                     .as_ref()
                                     .map(|dir| dir.join(&url).to_string_lossy().into_owned())
-                                    .unwrap_or(url)
-                            };
-                            open_url(&resolved);
+                                    .unwrap_or(url);
+                                s.navigate_request = Some(resolved);
+                            }
                         }
                     }
                     // Plain click clears selection; completed drag preserves it.

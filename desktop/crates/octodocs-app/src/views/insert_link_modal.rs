@@ -5,7 +5,6 @@ use adabraka_ui::components::input::Input;
 use adabraka_ui::components::input_state::InputState;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
-
 use crate::app_state::AppState;
 
 pub struct InsertLinkModal {
@@ -119,6 +118,8 @@ impl Render for InsertLinkModal {
             );
 
         // ── Content ───────────────────────────────────────────────────────
+        let url_weak_browse = self.url_input.downgrade();
+        let app_state_browse = self.app_state.clone();
         let content = div()
             .p(px(16.0))
             .flex()
@@ -133,14 +134,53 @@ impl Render for InsertLinkModal {
                     .child(label("Text"))
                     .child(Input::new(&self.text_input)),
             )
-            // URL field
+            // URL field + browse button
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
                     .child(label("URL"))
-                    .child(Input::new(&self.url_input)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .items_center()
+                            .child(div().flex_1().child(Input::new(&self.url_input)))
+                            .child(
+                                Button::new("browse-md", "…")
+                                    .variant(ButtonVariant::Outline)
+                                    .on_click(move |_, _w, cx| {
+                                        let doc_dir = app_state_browse
+                                            .read(cx)
+                                            .document
+                                            .path
+                                            .as_ref()
+                                            .and_then(|p| p.parent())
+                                            .map(|p| p.to_path_buf());
+                                        let mut dialog = rfd::FileDialog::new()
+                                            .add_filter("Markdown", &["md"]);
+                                        if let Some(dir) = &doc_dir {
+                                            dialog = dialog.set_directory(dir);
+                                        }
+                                        if let Some(picked) = dialog.pick_file() {
+                                            // Use relative path when inside the same directory tree.
+                                            let display = if let Some(dir) = &doc_dir {
+                                                picked
+                                                    .strip_prefix(dir)
+                                                    .map(|rel| rel.to_string_lossy().into_owned())
+                                                    .unwrap_or_else(|_| picked.to_string_lossy().into_owned())
+                                            } else {
+                                                picked.to_string_lossy().into_owned()
+                                            };
+                                            let _ = url_weak_browse.update(cx, |input, _| {
+                                                input.content = display.into();
+                                            });
+                                        }
+                                    }),
+                            ),
+                    ),
             );
 
         // ── Footer / action buttons ────────────────────────────────────────

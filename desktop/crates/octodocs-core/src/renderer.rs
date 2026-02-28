@@ -227,6 +227,8 @@ impl Renderer {
         let mut italic = false;
         let mut strikethrough = false;
         let mut underline = false;
+        // Link state
+        let mut in_link: Option<String> = None;
         // List / task list state
         let mut in_list_item = false;
         let mut task_list_checked: Option<bool> = None;
@@ -410,6 +412,12 @@ impl Renderer {
                 Event::End(TagEnd::Emphasis) => italic = false,
                 Event::Start(Tag::Strikethrough) => strikethrough = true,
                 Event::End(TagEnd::Strikethrough) => strikethrough = false,
+                Event::Start(Tag::Link { dest_url, .. }) => {
+                    in_link = Some(dest_url.to_string());
+                }
+                Event::End(TagEnd::Link) => {
+                    in_link = None;
+                }
 
                 Event::Html(html) | Event::InlineHtml(html) => {
                     let token = html.trim().to_lowercase();
@@ -441,6 +449,10 @@ impl Renderer {
                     } else if in_heading.is_some() {
                         heading_text.push_str(&s);
                     } else if in_paragraph || in_list_item {
+                        if let Some(ref url) = in_link {
+                            inline_buf.push(Inline::Link { text: s, url: url.clone() });
+                            continue;
+                        }
                         let inline = if bold {
                             Inline::Bold(s)
                         } else if italic {
