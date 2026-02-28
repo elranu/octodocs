@@ -141,3 +141,20 @@ This document summarizes the key implementation changes made in OctoDocs and exp
 - Toolbar actions and file actions work.
 - Theme follows system preference at startup.
 - Repository is now configured for small, maintainable commits.
+
+---
+
+## 11) macOS build fix — core-graphics version unification
+
+**What changed**
+- Bumped `core-graphics` dependency in `adabraka-gpui/Cargo.toml` from `"0.24"` to `"0.25"` for the macOS target.
+- `zed-font-kit/Cargo.toml` was already on `"0.25"` (no change needed there).
+- Updated `Cargo.lock` via `cargo fetch` so `adabraka-gpui` resolves to `core-graphics 0.25.0`.
+
+**Why**
+- `adabraka-gpui`'s `text_system.rs` creates `CGFont`/`CGContext` objects via its own `core_graphics` crate dependency.
+- `zed-font-kit` (the font rendering backend) also depends on `core-graphics` but at version `0.25`.
+- `core-text 21.1.0` (another adabraka-gpui dep) also requires `core-graphics ^0.25`.
+- Because both `0.24` and `0.25` were in the dependency graph, Rust treated `CGFont` from one as a different type from the other — producing E0308 mismatched type errors at the two cross-crate call sites in `text_system.rs` (lines 200 and 418).
+- `cocoa 0.26.1` still requires `core-graphics ^0.24` (unchanged); it continues to use `0.24.0` for its own internal types, which never interact with `text_system.rs` types.
+- After the bump, `text_system.rs` creates `CGFont`/`CGContext` from `0.25.0`, matching `zed-font-kit`'s expectation, resolving both errors.
