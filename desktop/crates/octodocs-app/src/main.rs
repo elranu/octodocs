@@ -1,4 +1,5 @@
 mod app_state;
+mod updater;
 mod views;
 
 use adabraka_ui::prelude::*;

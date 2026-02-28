@@ -13,7 +13,7 @@ use super::github_auth_modal::GithubAuthModal;
 use super::github_sidebar::GithubSidebar;
 use super::preview_pane::PreviewPane;
 use super::repo_add_modal::RepoAddModal;
-use crate::app_state::{AppState, PostAuthAction, copy_image_to_images_dir};
+use crate::app_state::{AppState, PostAuthAction, UpdateStatus, copy_image_to_images_dir};
 
 pub struct RootView {
     pub app_state: Entity<AppState>,
@@ -416,6 +416,8 @@ impl Render for RootView {
             (Some(current), Some(last)) => current == last,
             _ => false,
         };
+        let update_available = app.update_available.clone();
+        let update_status = app.update_status;
         let _ = app;
 
         if repo_add_modal_open {
@@ -739,6 +741,76 @@ impl Render for RootView {
             .size_full()
             .bg(theme.tokens.background)
             .child(self.toolbar.clone())
+            .when_some(update_available, |this, tag| {
+                let app_weak_dismiss = self.app_state.downgrade();
+                let app_weak_update = self.app_state.downgrade();
+                let update_label = match update_status {
+                    UpdateStatus::Idle => "Update now",
+                    UpdateStatus::Downloading => "Downloading...",
+                    UpdateStatus::Done => "Restart to apply",
+                };
+                let can_click = update_status == UpdateStatus::Idle;
+                let banner = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(34.0))
+                    .px(px(12.0))
+                    .bg(theme.tokens.primary)
+                    .border_b_1()
+                    .border_color(theme.tokens.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                Icon::new(IconSource::Named("arrow-up-circle".into()))
+                                    .size_3()
+                                    .color(theme.tokens.primary_foreground),
+                            )
+                            .child(
+                                body_small(format!("OctoDocs {} is available", tag))
+                                    .color(theme.tokens.primary_foreground),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .px(px(10.0))
+                                    .py(px(3.0))
+                                    .rounded(px(4.0))
+                                    .bg(theme.tokens.primary_foreground)
+                                    .cursor_pointer()
+                                    .when(can_click, |s| {
+                                        s.hover(|s| s.opacity(0.85)).on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            move |_, _, cx| {
+                                                let _ = app_weak_update
+                                                    .update(cx, |state, cx| state.trigger_update(cx));
+                                            },
+                                        )
+                                    })
+                                    .child(
+                                        body_small(update_label).color(theme.tokens.primary),
+                                    ),
+                            )
+                            .child(
+                                IconButton::new(IconSource::Named("x".into()))
+                                    .size(px(22.0))
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = app_weak_dismiss
+                                            .update(cx, |state, cx| state.dismiss_update(cx));
+                                    }),
+                            ),
+                    );
+                this.child(banner)
+            })
             .child(content_area)
             .child(status_bar)
             .when(auth_modal_open, |this| {

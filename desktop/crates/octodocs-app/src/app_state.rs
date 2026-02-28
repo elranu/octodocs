@@ -69,6 +69,17 @@ impl ViewMode {
     }
 }
 
+/// Tracks the progress of an in-app update initiated via the update banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// No update in progress.
+    Idle,
+    /// Downloading the new installer / running install.sh.
+    Downloading,
+    /// Update script launched; user should restart (Linux/macOS).
+    Done,
+}
+
 /// Central application state — one entity shared by all views.
 pub struct AppState {
     pub document: Document,
@@ -115,6 +126,11 @@ pub struct AppState {
     /// Counts how many pending editor notifications were triggered by load_document
     /// (not by the user). Observers skip marking dirty while this is > 0.
     loading_doc: usize,
+    /// Latest release tag available for update (e.g. "v0.1.8"), `None` if up-to-date.
+    pub update_available: Option<String>,
+    /// Progress of an in-progress update.
+    pub update_status: UpdateStatus,
+    _update_task: Option<Task<()>>,
 }
 
 impl AppState {
@@ -313,7 +329,7 @@ impl AppState {
             Some(github_bindings.len() - 1)
         };
 
-        Self {
+        let mut state = Self {
             document,
             blocks,
             dirty: false,
@@ -334,13 +350,36 @@ impl AppState {
             pending_post_auth_action: None,
             // One pending notification from the startup doc_editor.update() above.
             loading_doc: 1,
+            update_available: None,
+            update_status: UpdateStatus::Idle,
+            _update_task: None,
             _import_summary_version: 0,
             _sync_task: None,
             _pull_task: None,
             _summary_task: None,
             _doc_editor_subscription: doc_editor_sub,
             _full_content_subscription: full_subscription,
-        }
+        };
+
+        // Kick off background update check after 3 s so it never delays startup.
+        state._update_task = Some(cx.spawn(async move |this, cx| {
+            let tag = cx
+                .background_executor()
+                .spawn(async move {
+                    std::thread::sleep(Duration::from_secs(3));
+                    crate::updater::check_for_update()
+                })
+                .await;
+
+            if let Some(tag) = tag {
+                let _ = this.update(cx, |state, cx| {
+                    state.update_available = Some(tag);
+                    cx.notify();
+                });
+            }
+        }));
+
+        state
     }
 
     pub fn set_import_summary(&mut self, message: String, cx: &mut Context<AppState>) {
@@ -801,6 +840,58 @@ impl AppState {
                 Err(e) => eprintln!("Save-as error: {e}"),
             }
         }
+    }
+
+    /// Hide the update banner without installing.
+    pub fn dismiss_update(&mut self, cx: &mut Context<AppState>) {
+        self.update_available = None;
+        self.update_status = UpdateStatus::Idle;
+        cx.notify();
+    }
+
+    /// Begin the platform-appropriate update:
+    /// - Linux/macOS: re-runs `install.sh` via the system shell in the background.
+    /// - Windows: downloads the Inno Setup installer to `%TEMP%` then launches it
+    ///   silently; the installer calls `CloseApplications=force` so it will
+    ///   terminate us automatically.
+    pub fn trigger_update(&mut self, cx: &mut Context<AppState>) {
+        let Some(tag) = self.update_available.clone() else { return };
+
+        self.update_status = UpdateStatus::Downloading;
+        cx.notify();
+
+        self._update_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::updater::launch_update(&tag) })
+                .await;
+
+            match result {
+                Ok(()) => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        // The Inno Setup installer is now running with /verysilent.
+                        // It has CloseApplications=force so it will terminate us if
+                        // we're still alive; calling exit here is just a clean shortcut.
+                        std::process::exit(0);
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = this.update(cx, |state, cx| {
+                            state.update_status = UpdateStatus::Done;
+                            cx.notify();
+                        });
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Auto-update failed: {err}");
+                    let _ = this.update(cx, |state, cx| {
+                        state.update_status = UpdateStatus::Idle;
+                        cx.notify();
+                    });
+                }
+            }
+        }));
     }
 }
 
