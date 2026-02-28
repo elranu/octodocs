@@ -610,7 +610,7 @@ impl AppState {
             for rel_img in Self::extract_local_image_paths(&content) {
                 let full_img = dir.join(&rel_img);
                 if let Ok(bytes) = std::fs::read(&full_img) {
-                    if let Some(img_sync) = Self::relative_sync_path(&binding, &full_img) {
+                    if let Some(img_sync) = Self::relative_sync_path(binding, &full_img) {
                         images_to_push.push((img_sync, bytes));
                     }
                 }
@@ -662,7 +662,7 @@ impl AppState {
             let Some(bracket_end) = rest.find("](") else { continue };
             rest = &rest[bracket_end + 2..];
             let url_end = rest
-                .find(|c: char| c == ')' || c == '"' || c == ' ')
+                .find([')', '"', ' '])
                 .unwrap_or(rest.len());
             let url = rest[..url_end].trim_matches('<').trim_matches('>');
             if !url.is_empty() && !url.contains("://") {
