@@ -60,8 +60,8 @@ References:
 
 ## Index
 
-- [ ] Phase 1: [Viewport Virtualization in DocumentEditor](#phase-1-viewport-virtualization-in-documenteditor)
-- [ ] Phase 2: [Two-Phase Document Open](#phase-2-two-phase-document-open)
+- [x] Phase 1: [Viewport Virtualization in DocumentEditor](#phase-1-viewport-virtualization-in-documenteditor)
+- [x] Phase 2: [Two-Phase Document Open](#phase-2-two-phase-document-open)
 - [ ] Phase 3: [Cancellable Versioned Load Pipeline](#phase-3-cancellable-versioned-load-pipeline)
 - [ ] Phase 4: [Sidebar Directory Scan Cache](#phase-4-sidebar-directory-scan-cache)
 
@@ -179,14 +179,14 @@ The system after all four phases:
 
 **Files**: [document_editor.rs](../desktop/patches/adabraka-ui/src/components/document_editor.rs)
 
-- [ ] **1.1** Determine how scroll position is exposed during `paint()`. Locate the `ScrollHandle` or equivalent that feeds into `bounds`. Confirm whether `bounds.top()` already reflects scroll offset or is always the physical top-left of the component.
-- [ ] **1.2** Add a `viewport_top_px: f32` and `viewport_bottom_px: f32` derived from `bounds` and the parent scroll offset inside `paint()` entry. Define `OVERSCAN_PX: f32 = 300.0` (one screen of overscan above and below).
-- [ ] **1.3** In `paint()`: replace the unconditional paragraph loop with a two-stage loop:
+- [x] **1.1** Determine how scroll position is exposed during `paint()`. Locate the `ScrollHandle` or equivalent that feeds into `bounds`. Confirm whether `bounds.top()` already reflects scroll offset or is always the physical top-left of the component.
+- [x] **1.2** Add a `viewport_top_px: f32` and `viewport_bottom_px: f32` derived from `bounds` and the parent scroll offset inside `paint()` entry. Define `OVERSCAN_PX: f32 = 300.0` (one screen of overscan above and below).
+- [x] **1.3** In `paint()`: replace the unconditional paragraph loop with a two-stage loop:
   1. **Height accumulation pass** (all paragraphs, O(n) addition only): use `para_visual_heights[para_idx]` when available; use a default height estimate (e.g., `LINE_HEIGHT_PX * 1.5`) for paragraphs not yet in the cache. Accumulate `current_y` for every paragraph to know each one's screen position.
   2. **Shape + draw pass** (visible paragraphs only): skip shape/draw when `current_y + para_h < viewport_top_px - OVERSCAN_PX` or `current_y > viewport_bottom_px + OVERSCAN_PX`. Still update `current_y` for all to keep positions correct.
-- [ ] **1.4** Update `request_layout()` to use `para_visual_heights` for the total-height estimate instead of re-shaping every paragraph. Only shape paragraphs in the visible window during layout.
-- [ ] **1.5** Verify cursor hit-testing (`hit_test_position`, table hit-test) still works — these read from `layout_cache` which stores absolute `top_px`, so they are unaffected by paint-time culling as long as visible paragraphs still write into `layout_cache`.
-- [ ] **1.6** Smoke-test with a 500-line markdown document: confirm scroll is fluid and cursor placement is correct after scrolling.
+- [x] **1.4** Update `request_layout()` to use `para_visual_heights` for the total-height estimate instead of re-shaping every paragraph. Only shape paragraphs in the visible window during layout.
+- [x] **1.5** Verify cursor hit-testing (`hit_test_position`, table hit-test) still works — these read from `layout_cache` which stores absolute `top_px`, so they are unaffected by paint-time culling as long as visible paragraphs still write into `layout_cache`.
+- [x] **1.6** Smoke-test with a 500-line markdown document: confirm scroll is fluid and cursor placement is correct after scrolling.
 
 ```
 Before:  paint(200 paragraphs) → shape 200 × N lines → O(document_size)
@@ -202,14 +202,14 @@ After:   height_accum(200 paragraphs) → O(200 additions)
 
 **Files**: [app_state.rs](../desktop/crates/octodocs-app/src/app_state.rs), [document_editor.rs](../desktop/patches/adabraka-ui/src/components/document_editor.rs)
 
-- [ ] **2.1** Add a `clear_document(&mut self, path: PathBuf, cx)` method to `AppState` that:
+- [x] **2.1** Add a `clear_document(&mut self, path: PathBuf, cx)` method to `AppState` that:
   - Sets `self.document.path = Some(path)`
   - Calls `doc_editor.update(cx, |editor, _| editor.paragraphs.clear())` (or a new `editor.clear()` helper)
   - Calls `cx.notify()`
   - Does NOT touch `full_editor_state` (handled in phase-2 hydration)
-- [ ] **2.2** At the top of `pull_and_open_file()`, call `self.clear_document(path.clone(), cx)` before spawning the background task. This makes the sidebar active state update on the current frame while parse work proceeds asynchronously.
-- [ ] **2.3** Add a `clear()` convenience method to `DocumentEditorState` that resets paragraphs, cursor, selection, and layout caches without triggering a notify (the caller controls notify timing).
-- [ ] **2.4** Verify that `GithubSidebar` derives the active-file indicator from `app_state.document.path` (not from `selected_file`). If it does, Phase 2.1 is sufficient to update the sidebar immediately.
+- [x] **2.2** At the top of `pull_and_open_file()`, call `self.clear_document(path.clone(), cx)` before spawning the background task. This makes the sidebar active state update on the current frame while parse work proceeds asynchronously.
+- [x] **2.3** Add a `clear()` convenience method to `DocumentEditorState` that resets paragraphs, cursor, selection, and layout caches without triggering a notify (the caller controls notify timing).
+- [x] **2.4** Verify that `GithubSidebar` derives the active-file indicator from `app_state.document.path` (not from `selected_file`). If it does, Phase 2.1 is sufficient to update the sidebar immediately.
 
 ---
 

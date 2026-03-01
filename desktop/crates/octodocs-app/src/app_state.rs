@@ -126,6 +126,9 @@ pub struct AppState {
     /// Counts how many pending editor notifications were triggered by load_document
     /// (not by the user). Observers skip marking dirty while this is > 0.
     loading_doc: usize,
+    /// Monotonic generation id for open-file requests.
+    /// Async results from older generations are ignored.
+    load_generation: u64,
     /// Latest release tag available for update (e.g. "v0.1.8"), `None` if up-to-date.
     pub update_available: Option<String>,
     /// Progress of an in-progress update.
@@ -346,6 +349,7 @@ impl AppState {
             pending_post_auth_action: None,
             // One pending notification from the startup doc_editor.update() above.
             loading_doc: 1,
+            load_generation: 0,
             update_available: None,
             update_status: UpdateStatus::Idle,
             _update_task: None,
@@ -533,6 +537,8 @@ impl AppState {
     /// Public so that view code can call it directly (e.g. "Open" toolbar button, Discard prompt).
     pub fn pull_and_open_file(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
         self.clear_document_for_open(path.clone(), cx);
+        self.load_generation = self.load_generation.saturating_add(1);
+        let expected_gen = self.load_generation;
 
         // Resolve sync binding metadata — fall back to async local open if none.
         // Token lookup is intentionally done on the background executor to keep UI responsive.
@@ -553,11 +559,16 @@ impl AppState {
                             Ok::<_, anyhow::Error>((doc, paragraphs, blocks, normalized))
                         })
                         .await;
-                    let _ = this.update(cx, |state, cx| match result {
+                    let _ = this.update(cx, |state, cx| {
+                        if state.load_generation != expected_gen {
+                            return;
+                        }
+                        match result {
                         Ok((doc, paragraphs, blocks, normalized)) => {
                             state.load_document_parsed(doc, paragraphs, blocks, normalized, cx)
                         }
                         Err(e) => eprintln!("Open error: {e}"),
+                        }
                     });
                 }));
                 return;
@@ -601,36 +612,47 @@ impl AppState {
                 })
                 .await;
 
-            let _ = this.update(cx, |state, cx| match result {
-                Ok((_pulled, doc, paragraphs, blocks, normalized)) => {
-                    state.github_sync_status = SyncStatus::Idle;
-                    state.load_document_parsed(doc, paragraphs, blocks, normalized, cx);
+            let _ = this.update(cx, |state, cx| {
+                if state.load_generation != expected_gen {
+                    return;
                 }
-                Err(err) => {
-                    state.github_sync_status = SyncStatus::Failed {
-                        message: err.to_string(),
-                    };
-                    cx.notify();
-                    // Open fallback on background thread — never block the UI.
-                    state._pull_task = Some(cx.spawn(async move |this, cx| {
-                        let result = cx
-                            .background_executor()
-                            .spawn(async move {
-                                let doc = octodocs_core::FileIo::open(&path_fallback)?;
-                                let content = doc.content.clone();
-                                let paragraphs = markdown_to_doc_paragraphs(&content);
-                                let blocks = Renderer::parse_blocks(&content);
-                                let normalized = doc_paragraphs_to_markdown(&paragraphs);
-                                Ok::<_, anyhow::Error>((doc, paragraphs, blocks, normalized))
-                            })
-                            .await;
-                        let _ = this.update(cx, |state, cx| match result {
-                            Ok((doc, paragraphs, blocks, normalized)) => {
-                                state.load_document_parsed(doc, paragraphs, blocks, normalized, cx)
-                            }
-                            Err(e) => eprintln!("Open error: {e}"),
-                        });
-                    }));
+
+                match result {
+                    Ok((_pulled, doc, paragraphs, blocks, normalized)) => {
+                        state.github_sync_status = SyncStatus::Idle;
+                        state.load_document_parsed(doc, paragraphs, blocks, normalized, cx);
+                    }
+                    Err(err) => {
+                        state.github_sync_status = SyncStatus::Failed {
+                            message: err.to_string(),
+                        };
+                        cx.notify();
+                        // Open fallback on background thread — never block the UI.
+                        state._pull_task = Some(cx.spawn(async move |this, cx| {
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    let doc = octodocs_core::FileIo::open(&path_fallback)?;
+                                    let content = doc.content.clone();
+                                    let paragraphs = markdown_to_doc_paragraphs(&content);
+                                    let blocks = Renderer::parse_blocks(&content);
+                                    let normalized = doc_paragraphs_to_markdown(&paragraphs);
+                                    Ok::<_, anyhow::Error>((doc, paragraphs, blocks, normalized))
+                                })
+                                .await;
+                            let _ = this.update(cx, |state, cx| {
+                                if state.load_generation != expected_gen {
+                                    return;
+                                }
+                                match result {
+                                    Ok((doc, paragraphs, blocks, normalized)) => {
+                                        state.load_document_parsed(doc, paragraphs, blocks, normalized, cx)
+                                    }
+                                    Err(e) => eprintln!("Open error: {e}"),
+                                }
+                            });
+                        }));
+                    }
                 }
             });
         }));
