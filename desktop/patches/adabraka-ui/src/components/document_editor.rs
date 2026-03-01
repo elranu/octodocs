@@ -15,6 +15,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Actions
@@ -191,9 +193,10 @@ impl DocumentEditorState {
         self.hovered_image_para = None;
         self.drag_occurred = false;
         self.table_cursor = None;
-        // Evict the image decode cache when loading a new document so stale
-        // bitmaps (e.g. images deleted or replaced on disk) are not shown.
+        // Evict image / mermaid decode caches when loading a new document so
+        // stale bitmaps (e.g. images deleted or replaced on disk) are not shown.
         IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
+        MERMAID_CACHE.with(|cache| cache.borrow_mut().clear());
         cx.notify();
     }
 
@@ -1479,6 +1482,17 @@ const IMAGE_BLOCK_DEFAULT_HEIGHT: f32 = 300.0;
 thread_local! {
     static IMAGE_CACHE: RefCell<std::collections::HashMap<String, Arc<RenderImage>>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Mermaid source hash → rendered RenderImage (Ok) or failed flag (Err).
+    static MERMAID_CACHE: RefCell<std::collections::HashMap<u64, Result<Arc<RenderImage>, ()>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Compute a stable u64 hash for a mermaid source string.
+fn mermaid_source_hash(source: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    "mermaid-v1".hash(&mut h);
+    source.hash(&mut h);
+    h.finish()
 }
 const TABLE_ROW_H: f32 = 28.0;
 const TABLE_CELL_PAD_X: f32 = 8.0;
@@ -1880,34 +1894,87 @@ impl Element for DocumentEditorElement {
 
             match kind {
                 ParagraphKind::Mermaid(_) => {
-                    // Paint a placeholder rectangle for mermaid blocks
+                    // The actual mermaid source is stored in para.spans, not in the PathBuf field.
+                    let mermaid_source = para.plain_text();
                     let top_screen = bounds.top() + px(current_y);
-                    let mermaid_bounds = Bounds::new(
-                        point(left, top_screen),
-                        size(bounds.size.width - px(LEFT_MARGIN * 2.0), px(MERMAID_HEIGHT)),
-                    );
-                    window.paint_quad(fill(mermaid_bounds, theme.tokens.muted.opacity(0.3)));
-                    // Label
-                    let label_run = TextRun {
-                        len: "Mermaid diagram".len(),
-                        font: base_font.clone(),
-                        color: theme.tokens.muted_foreground,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    let shaped = window.text_system().shape_line(
-                        "Mermaid diagram".into(),
-                        px(13.0),
-                        &[label_run],
-                        None,
-                    );
-                    let _ = shaped.paint(
-                        point(left, top_screen + px(MERMAID_HEIGHT / 2.0 - 8.0)),
-                        px(20.0),
-                        window,
-                        cx,
-                    );
+                    let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+                    let key = mermaid_source_hash(&mermaid_source);
+
+                    // Render to PNG once, cache the decoded RenderImage.
+                    let render_image: Option<Arc<RenderImage>> = MERMAID_CACHE.with(|cache| {
+                        let mut map = cache.borrow_mut();
+                        if let Some(entry) = map.get(&key) {
+                            return entry.as_ref().ok().cloned();
+                        }
+                        // Generate PNG to temp cache dir.
+                        let cache_dir = std::env::temp_dir().join("octodocs-mermaid-cache");
+                        let _ = std::fs::create_dir_all(&cache_dir);
+                        let png_path = cache_dir.join(format!("{key}.png"));
+                        let result = if png_path.exists() {
+                            std::fs::read(&png_path).ok()
+                        } else {
+                            match octodocs_core::mermaid::render_png(&mermaid_source, &png_path) {
+                                Ok(_) => std::fs::read(&png_path).ok(),
+                                Err(_) => None,
+                            }
+                        };
+                        let ri = result
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|dyn_img| {
+                                let mut rgba = dyn_img.into_rgba8();
+                                // GPUI requires BGRA: swap R and B channels.
+                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                            });
+                        let out = ri.clone();
+                        map.insert(key, ri.ok_or(()));
+                        out
+                    });
+
+                    if let Some(ri) = render_image {
+                        let img_size = ri.size(0);
+                        let iw = img_size.width.0 as f32;
+                        let ih = img_size.height.0 as f32;
+                        if iw > 0.0 && ih > 0.0 {
+                            let scale = (f32::from(block_w) / iw).min(MERMAID_HEIGHT / ih);
+                            let dw = iw * scale;
+                            let dh = ih * scale;
+                            let ox = (f32::from(block_w) - dw) / 2.0;
+                            let oy = (MERMAID_HEIGHT - dh) / 2.0;
+                            let paint_bounds = Bounds::new(
+                                point(left + px(ox), top_screen + px(oy)),
+                                size(px(dw), px(dh)),
+                            );
+                            let _ = window.paint_image(paint_bounds, gpui::Corners::default(), ri, 0, false);
+                        }
+                    } else {
+                        // Fallback placeholder when rendering failed.
+                        let mermaid_bounds = Bounds::new(
+                            point(left, top_screen),
+                            size(block_w, px(MERMAID_HEIGHT)),
+                        );
+                        window.paint_quad(fill(mermaid_bounds, theme.tokens.muted.opacity(0.3)));
+                        let label_run = TextRun {
+                            len: "Mermaid diagram".len(),
+                            font: base_font.clone(),
+                            color: theme.tokens.muted_foreground,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shaped = window.text_system().shape_line(
+                            "Mermaid diagram".into(),
+                            px(13.0),
+                            &[label_run],
+                            None,
+                        );
+                        let _ = shaped.paint(
+                            point(left, top_screen + px(MERMAID_HEIGHT / 2.0 - 8.0)),
+                            px(20.0),
+                            window,
+                            cx,
+                        );
+                    }
                     visual_lines.push(VisualLine {
                         para_idx,
                         char_start: 0,
