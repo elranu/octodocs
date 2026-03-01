@@ -10,8 +10,11 @@ use octodocs_github::{
 use crate::app_state::{AppState, PostAuthAction};
 
 fn github_client_id() -> Option<String> {
-    std::env::var("GITHUB_CLIENT_ID")
+    std::env::var("OCTODOCS_GITHUB_CLIENT_ID")
         .ok()
+        .or_else(|| std::env::var("GITHUB_CLIENT_ID").ok())
+        .or_else(|| option_env!("OCTODOCS_GITHUB_CLIENT_ID").map(str::to_owned))
+        .or_else(|| option_env!("GITHUB_CLIENT_ID").map(str::to_owned))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -113,7 +116,7 @@ impl GithubAuthModal {
     pub fn start_auth(&mut self, cx: &mut Context<Self>) {
         let Some(client_id) = github_client_id() else {
             self.state = AuthState::Error {
-                message: "GitHub OAuth is not configured. Set GITHUB_CLIENT_ID (supports .env) and restart the app.".to_string(),
+                message: "GitHub OAuth is not configured. Set OCTODOCS_GITHUB_CLIENT_ID (.env or build-time) and restart the app.".to_string(),
             };
             cx.notify();
             return;
