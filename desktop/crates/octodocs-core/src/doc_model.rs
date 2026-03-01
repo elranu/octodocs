@@ -161,17 +161,52 @@ impl InlineSpan {
 // RenderNode → DocParagraph conversion
 // ─────────────────────────────────────────────────────────────
 
-fn inlines_to_plain_text(inlines: &[Inline]) -> String {
+fn inlines_to_cell_markdown(inlines: &[Inline]) -> String {
     let mut s = String::new();
     for inline in inlines {
         match inline {
-            Inline::Text(t) | Inline::Bold(t) | Inline::Italic(t)
-            | Inline::Underline(t) | Inline::Strikethrough(t)
-            | Inline::Code(t) => s.push_str(t),
-            Inline::Link { text, .. } => s.push_str(text),
-            Inline::Image { alt, .. } => s.push_str(alt),
+            Inline::Text(t) => s.push_str(t),
+            Inline::Bold(t) => {
+                s.push_str("**");
+                s.push_str(t);
+                s.push_str("**");
+            }
+            Inline::Italic(t) => {
+                s.push('*');
+                s.push_str(t);
+                s.push('*');
+            }
+            Inline::Underline(t) => {
+                s.push_str("<u>");
+                s.push_str(t);
+                s.push_str("</u>");
+            }
+            Inline::Strikethrough(t) => {
+                s.push_str("~~");
+                s.push_str(t);
+                s.push_str("~~");
+            }
+            Inline::Code(t) => {
+                s.push('`');
+                s.push_str(t);
+                s.push('`');
+            }
+            Inline::Link { text, url } => {
+                s.push('[');
+                s.push_str(text);
+                s.push_str("](");
+                s.push_str(url);
+                s.push(')');
+            }
+            Inline::Image { alt, url, .. } => {
+                s.push_str("![");
+                s.push_str(alt);
+                s.push_str("](");
+                s.push_str(url);
+                s.push(')');
+            }
             Inline::SoftBreak => s.push(' '),
-            Inline::HardBreak => s.push('\n'),
+            Inline::HardBreak => s.push(' '),
         }
     }
     s
@@ -184,7 +219,7 @@ fn table_to_gfm_markdown(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> 
     md.push('|');
     for cell in headers {
         md.push(' ');
-        md.push_str(&inlines_to_plain_text(cell));
+        md.push_str(&inlines_to_cell_markdown(cell));
         md.push_str(" |");
     }
     md.push('\n');
@@ -199,7 +234,7 @@ fn table_to_gfm_markdown(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> 
         md.push('|');
         for i in 0..col_count {
             let cell_text = row.get(i)
-                .map(|cell| inlines_to_plain_text(cell))
+                .map(|cell| inlines_to_cell_markdown(cell))
                 .unwrap_or_default();
             md.push(' ');
             md.push_str(&cell_text);
@@ -309,10 +344,10 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
         RenderNode::ThematicBreak => vec![],
         RenderNode::Table { headers, rows } => {
             let source = table_to_gfm_markdown(headers, rows);
-            let header_texts: Vec<String> = headers.iter().map(|c| inlines_to_plain_text(c)).collect();
+            let header_texts: Vec<String> = headers.iter().map(|c| inlines_to_cell_markdown(c)).collect();
             let row_texts: Vec<Vec<String>> = rows
                 .iter()
-                .map(|row| row.iter().map(|c| inlines_to_plain_text(c)).collect())
+                .map(|row| row.iter().map(|c| inlines_to_cell_markdown(c)).collect())
                 .collect();
             vec![DocParagraph {
                 kind: ParagraphKind::Table { source, headers: header_texts, rows: row_texts },
@@ -653,5 +688,25 @@ mod tests {
         // clean path back; spaces in the original are normalised by copy_image_to_images_dir
         // before insertion, but the parser must at least survive without panicking).
         assert!(!out.is_empty(), "round-trip produced empty output for spaced URL");
+    }
+
+    #[test]
+    fn table_link_roundtrip() {
+        let md = "| Name | Ref |\n| --- | --- |\n| API | [docs](README.md) |\n";
+        let out = roundtrip(md);
+        assert!(
+            out.contains("[docs](README.md)"),
+            "table link should round-trip, got: {out}"
+        );
+    }
+
+    #[test]
+    fn table_http_link_roundtrip() {
+        let md = "| Name | URL |\n| --- | --- |\n| Site | [Open](https://example.com) |\n";
+        let out = roundtrip(md);
+        assert!(
+            out.contains("[Open](https://example.com)"),
+            "table http link should round-trip, got: {out}"
+        );
     }
 }

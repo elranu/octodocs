@@ -434,6 +434,21 @@ impl DocumentEditorState {
 
     /// Get selected text as a String (or empty if no selection).
     pub fn selected_text(&self) -> String {
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let Some(sel) = self.selection else { return String::new(); };
+                let (start, end) = sel.ordered();
+                if start.para_idx == para_idx && end.para_idx == para_idx {
+                    let cell = self.table_cell_text(para_idx, tr, tc);
+                    let s = start.char_offset.min(cell.chars().count());
+                    let e = end.char_offset.min(cell.chars().count());
+                    return cell.chars().skip(s).take(e.saturating_sub(s)).collect();
+                }
+                return String::new();
+            }
+        }
+
         let Some(sel) = self.selection else { return String::new(); };
         let (start, end) = sel.ordered();
         if start.para_idx == end.para_idx {
@@ -459,6 +474,51 @@ impl DocumentEditorState {
 
     /// Insert (or replace selection with) a hyperlink span.
     pub fn insert_link(&mut self, text: String, url: String, cx: &mut Context<Self>) {
+        // Table cells are stored as plain strings (not inline spans), so insert
+        // markdown link syntax directly into the active cell.
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                let insert_text = if text.is_empty() { url.clone() } else { text };
+                let link_md = format!("[{insert_text}]({url})");
+                let cell: &mut String = if tr == 0 {
+                    &mut headers[tc]
+                } else {
+                    &mut rows[tr - 1][tc]
+                };
+                let (start_off, end_off) = if let Some(sel) = self.selection {
+                    let (start, end) = sel.ordered();
+                    if start.para_idx == para_idx && end.para_idx == para_idx {
+                        (start.char_offset, end.char_offset)
+                    } else {
+                        (self.cursor.char_offset, self.cursor.char_offset)
+                    }
+                } else {
+                    (self.cursor.char_offset, self.cursor.char_offset)
+                };
+                let char_count = cell.chars().count();
+                let safe_start = start_off.min(char_count);
+                let safe_end = end_off.min(char_count);
+                if safe_start < safe_end {
+                    let byte_s = cell.char_indices().nth(safe_start).map(|(i, _)| i).unwrap_or(cell.len());
+                    let byte_e = cell.char_indices().nth(safe_end).map(|(i, _)| i).unwrap_or(cell.len());
+                    cell.drain(byte_s..byte_e);
+                }
+                let insert_off = safe_start.min(cell.chars().count());
+                let byte_off = cell
+                    .char_indices()
+                    .nth(insert_off)
+                    .map(|(i, _)| i)
+                    .unwrap_or(cell.len());
+                cell.insert_str(byte_off, &link_md);
+                *source = gfm_rebuild_from_strings(headers, rows);
+                self.cursor.char_offset = insert_off + link_md.chars().count();
+                self.selection = None;
+                cx.notify();
+                return;
+            }
+        }
+
         // Delete any active selection first (including multi-paragraph) so the
         // link reliably replaces whatever is selected.
         if self.selection.is_some() {
@@ -555,6 +615,29 @@ impl DocumentEditorState {
     fn delete_selection(&mut self, cx: &mut Context<Self>) -> DocCursor {
         let Some(sel) = self.selection.take() else { return self.cursor; };
         let (start, end) = sel.ordered();
+
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if start.para_idx == para_idx
+                && end.para_idx == para_idx
+                && matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. })
+            {
+                if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                    let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                    let char_count = cell.chars().count();
+                    let safe_start = start.char_offset.min(char_count);
+                    let safe_end = end.char_offset.min(char_count);
+                    if safe_start < safe_end {
+                        let byte_s = cell.char_indices().nth(safe_start).map(|(i, _)| i).unwrap_or(cell.len());
+                        let byte_e = cell.char_indices().nth(safe_end).map(|(i, _)| i).unwrap_or(cell.len());
+                        cell.drain(byte_s..byte_e);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                    }
+                    cx.notify();
+                    return DocCursor { para_idx, char_offset: safe_start };
+                }
+            }
+        }
 
         if start.para_idx == end.para_idx {
             let count = end.char_offset - start.char_offset;
@@ -1342,12 +1425,41 @@ impl DocumentEditorState {
         }
     }
 
+    fn table_cursor_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<DocCursor> {
+        let (row, col) = self.table_cell_from_point(point, bounds)?;
+        let left = bounds.left() + px(LEFT_MARGIN);
+        let vl = self.layout_cache.iter().rev().find(|vl|
+            bounds.top() + px(vl.top_px) <= point.y
+        )?;
+        let para_idx = vl.para_idx;
+        let ParagraphKind::Table { headers, .. } = &self.paragraphs[para_idx].kind else {
+            return None;
+        };
+
+        let col_count = headers.len().max(1);
+        let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+        let col_w_f32: f32 = table_w / px(col_count as f32);
+        let cell_x = left + px(col_w_f32 * col as f32);
+        let text_x_start = cell_x + px(TABLE_CELL_PAD_X);
+        let text_x_end = cell_x + px(col_w_f32 - TABLE_CELL_PAD_X);
+        let rel = ((point.x - text_x_start) / (text_x_end - text_x_start).max(px(1.0))).clamp(0.0, 1.0);
+
+        let cell = self.table_cell_text(para_idx, row, col);
+        let len = cell.chars().count();
+        let char_offset = ((len as f32) * rel).round() as usize;
+        Some(DocCursor { para_idx, char_offset: char_offset.min(len) })
+    }
+
     // ── Mouse ─────────────────────────────────────────────────────────────────
 
     /// Map a screen-space click position to the nearest document cursor position.
     /// Uses the per-line `glyph_xs` cache populated each paint pass for accurate
     /// sub-character hit testing without needing live `ShapedLine` objects.
     pub fn cursor_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> DocCursor {
+        if let Some(c) = self.table_cursor_from_point(point, bounds) {
+            return c;
+        }
+
         let relative_x = (point.x - (bounds.left() + px(LEFT_MARGIN))).max(px(0.0));
 
         // Find the last visual line whose top edge is at or above the click y.
@@ -1760,6 +1872,24 @@ fn gfm_rebuild_from_strings(headers: &[String], rows: &[Vec<String>]) -> String 
     out
 }
 
+/// Parse a simple markdown link that occupies the full cell text: `[label](url)`.
+fn parse_markdown_link_exact(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    if !t.starts_with('[') || !t.ends_with(')') {
+        return None;
+    }
+    let close_bracket = t.find("](")?;
+    if close_bracket < 1 || close_bracket + 2 >= t.len() {
+        return None;
+    }
+    let label = &t[1..close_bracket];
+    let url = &t[(close_bracket + 2)..(t.len() - 1)];
+    if label.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some((label.to_string(), url.to_string()))
+}
+
 /// Total pixel height for a table paragraph (header row + data rows + border).
 fn table_height(headers: &[String], rows: &[Vec<String>]) -> f32 {
     let _ = headers;
@@ -1918,6 +2048,7 @@ fn spans_to_text_runs(
     base_color: Hsla,
     emphasis_color: Hsla,
     code_color: Hsla,
+    link_color: Hsla,
     mono_font_family: &SharedString,
 ) -> (String, Vec<TextRun>) {
     let mut line_text = String::new();
@@ -1953,7 +2084,7 @@ fn spans_to_text_runs(
         let color = match span.format {
             InlineFormat::Code => code_color,
             InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
-            InlineFormat::Link => blue(),
+            InlineFormat::Link => link_color,
             InlineFormat::Plain => base_color,
         };
 
@@ -1965,7 +2096,7 @@ fn spans_to_text_runs(
             }),
             InlineFormat::Link => Some(UnderlineStyle {
                 thickness: px(1.0),
-                color: Some(blue()),
+                color: Some(link_color),
                 wavy: false,
             }),
             _ => None,
@@ -2155,6 +2286,7 @@ impl Element for DocumentEditorElement {
         let mono_family: SharedString = theme.tokens.font_mono.clone().into();
         let emphasis_color = theme.tokens.primary;
         let code_color = theme.tokens.primary.opacity(0.85);
+        let link_color = gpui::hsla(200.0 / 360.0, 0.95, 0.72, 1.0);
         let selection_color = theme.tokens.primary.opacity(0.22);
         let caret_color = theme.tokens.primary;
         let viewport = window.viewport_size();
@@ -2599,22 +2731,37 @@ impl Element for DocumentEditorElement {
                     let cell_font_size = px(13.0);
                     let cell_lh = px(TABLE_ROW_H);
 
-                    let mut paint_cells = |cells: &[String], row_top: Pixels, bold: bool, window: &mut Window| {
+                    let mut paint_cells = |cells: &[String], row_top: Pixels, bold: bool, row_index: usize, window: &mut Window| {
                         let mut header_font = base_font.clone();
                         if bold { header_font.weight = gpui::FontWeight::BOLD; }
                         for (ci, cell_text) in cells.iter().enumerate() {
                             let cell_x = left + px(col_w_f32 * ci as f32 + TABLE_CELL_PAD_X);
                             let cell_y = row_top + px(TABLE_CELL_PAD_Y);
+                            let cell_content_w = (col_w_f32 - TABLE_CELL_PAD_X * 2.0).max(4.0);
+                            let (render_text, render_is_link) = if let Some((label, _url)) = parse_markdown_link_exact(cell_text) {
+                                (label, true)
+                            } else {
+                                (cell_text.clone(), false)
+                            };
                             // Clip text to column width
-                            let max_chars = ((col_w_f32 - TABLE_CELL_PAD_X * 2.0) / 7.5).max(4.0) as usize;
-                            let display: String = cell_text.chars().take(max_chars.max(4)).collect();
+                            let max_chars = (cell_content_w / 7.5).max(4.0) as usize;
+                            let display: String = render_text.chars().take(max_chars.max(4)).collect();
                             if display.is_empty() { continue; }
+                            let underline = if render_is_link {
+                                Some(UnderlineStyle {
+                                    thickness: px(1.0),
+                                    color: Some(link_color),
+                                    wavy: false,
+                                })
+                            } else {
+                                None
+                            };
                             let run = TextRun {
                                 len: display.len(),
                                 font: header_font.clone(),
-                                color: if bold { theme.tokens.foreground } else { theme.tokens.foreground },
+                                color: if render_is_link { link_color } else { theme.tokens.foreground },
                                 background_color: None,
-                                underline: None,
+                                underline,
                                 strikethrough: None,
                             };
                             let shaped = window.text_system().shape_line(
@@ -2623,12 +2770,37 @@ impl Element for DocumentEditorElement {
                                 &[run],
                                 None,
                             );
+
+                            if let Some(sel) = selection {
+                                if let Some((tc_tr, tc_tc)) = table_cursor {
+                                    if cursor.para_idx == para_idx && tc_tr == row_index && tc_tc == ci {
+                                        let (sel_start, sel_end) = sel.ordered();
+                                        let raw_len = cell_text.chars().count();
+                                        let s = sel_start.char_offset.min(raw_len);
+                                        let e = sel_end.char_offset.min(raw_len);
+                                        if e > s {
+                                            let raw_prefix_s: String = cell_text.chars().take(s).collect();
+                                            let raw_prefix_e: String = cell_text.chars().take(e).collect();
+                                            let x1 = shaped.x_for_index(raw_prefix_s.len());
+                                            let x2 = shaped.x_for_index(raw_prefix_e.len());
+                                            let width = (x2 - x1).max(px(1.0));
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(cell_x + x1, row_top + px(2.0)),
+                                                    size(width, px(TABLE_ROW_H - 4.0)),
+                                                ),
+                                                selection_color,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                             let _ = shaped.paint(point(cell_x, cell_y), cell_lh, window, cx);
                         }
                     };
 
                     // Header row (bold)
-                    paint_cells(headers, top_screen, true, window);
+                    paint_cells(headers, top_screen, true, 0, window);
                     // Data rows
                     for (ri, row) in rows.iter().enumerate() {
                         let row_top = top_screen + px(TABLE_ROW_H * (ri + 1) as f32);
@@ -2640,7 +2812,7 @@ impl Element for DocumentEditorElement {
                             );
                             window.paint_quad(fill(row_bg, theme.tokens.muted.opacity(0.15)));
                         }
-                        paint_cells(row, row_top, false, window);
+                        paint_cells(row, row_top, false, ri + 1, window);
                     }
 
                     // ── Active cell highlight + text cursor ─────────────────
@@ -2844,6 +3016,7 @@ impl Element for DocumentEditorElement {
                         para_color,
                         emphasis_color,
                         code_color,
+                        link_color,
                         &mono_family,
                     );
                     let total_run_bytes: usize = runs.iter().map(|r| r.len).sum();
@@ -3271,11 +3444,6 @@ impl RenderOnce for DocumentEditor {
                 state.update(cx, |s, cx| {
                     s.cursor = new_cursor;
                     s.table_cursor = new_table_cell;
-                    // When clicking into a table cell, position char_offset at end of cell text
-                    if let Some((tr, tc)) = new_table_cell {
-                        let cell_len = s.table_cell_text(s.cursor.para_idx, tr, tc).chars().count();
-                        s.cursor.char_offset = cell_len;
-                    }
                     // Do not clear selection here. A plain click will clear it on mouse up;
                     // a drag will set drag_occurred=true and keep the selection.
                     s.drag_anchor = Some(new_cursor);
@@ -3373,9 +3541,13 @@ impl RenderOnce for DocumentEditor {
                 };
                 if let Some(anchor) = drag_anchor {
                     let focus_cursor = state_move.read(cx).cursor_from_point(event.position, bounds);
+                    let focus_table_cell = state_move.read(cx).table_cell_from_point(event.position, bounds);
                     state_move.update(cx, |s, cx| {
                         s.drag_occurred = true;
                         s.cursor = focus_cursor;
+                        if focus_table_cell.is_some() {
+                            s.table_cursor = focus_table_cell;
+                        }
                         s.selection = if anchor == focus_cursor {
                             None
                         } else {
@@ -3395,6 +3567,22 @@ impl RenderOnce for DocumentEditor {
                     }
                     // Plain click (no drag): open link if the cursor landed on a Link span.
                     if !s.drag_occurred {
+                        if let Some((tr, tc)) = s.table_cursor {
+                            let para_idx = s.cursor.para_idx;
+                            if matches!(&s.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                                let cell = s.table_cell_text(para_idx, tr, tc);
+                                if let Some((_label, url)) = parse_markdown_link_exact(&cell) {
+                                    if url.starts_with("http://") || url.starts_with("https://") {
+                                        open_url(&url);
+                                    } else if let Some(dir) = s.document_dir.as_ref() {
+                                        let resolved = dir.join(&url).to_string_lossy().into_owned();
+                                        s.navigate_request = Some(resolved);
+                                    } else if std::path::Path::new(&url).is_absolute() {
+                                        s.navigate_request = Some(url);
+                                    }
+                                }
+                            }
+                        }
                         if let Some(url) = s.link_url_at_offset(s.cursor.para_idx, s.cursor.char_offset) {
                             if url.starts_with("http://") || url.starts_with("https://") {
                                 open_url(&url);

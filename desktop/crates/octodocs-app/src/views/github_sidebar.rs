@@ -42,6 +42,7 @@ pub struct GithubSidebar {
     refreshing_dirs: HashSet<PathBuf>,
     focused_dir: Option<PathBuf>,
     selected_file: Option<PathBuf>,
+    last_doc_path: Option<PathBuf>,
     file_context_menu: Option<(PathBuf, Point<Pixels>)>,
     rename_target: Option<PathBuf>,
     rename_input: Entity<InputState>,
@@ -62,6 +63,7 @@ impl GithubSidebar {
             refreshing_dirs: HashSet::new(),
             focused_dir: None,
             selected_file: None,
+            last_doc_path: None,
             file_context_menu: None,
             rename_target: None,
             rename_input,
@@ -612,6 +614,11 @@ impl Render for GithubSidebar {
         let weak = cx.entity().downgrade();
 
         let app = self.app_state.read(cx);
+        let current_doc_path = app.document.path.clone();
+        if self.last_doc_path != current_doc_path {
+            self.last_doc_path = current_doc_path.clone();
+            self.selected_file = current_doc_path;
+        }
         let bindings = app.github_bindings.clone();
         let active_idx = self.active_index(bindings.len(), app.active_binding_idx);
         let _ = app;
