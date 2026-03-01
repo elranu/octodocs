@@ -62,8 +62,8 @@ References:
 
 - [x] Phase 1: [Viewport Virtualization in DocumentEditor](#phase-1-viewport-virtualization-in-documenteditor)
 - [x] Phase 2: [Two-Phase Document Open](#phase-2-two-phase-document-open)
-- [ ] Phase 3: [Cancellable Versioned Load Pipeline](#phase-3-cancellable-versioned-load-pipeline)
-- [ ] Phase 4: [Sidebar Directory Scan Cache](#phase-4-sidebar-directory-scan-cache)
+- [x] Phase 3: [Cancellable Versioned Load Pipeline](#phase-3-cancellable-versioned-load-pipeline)
+- [x] Phase 4: [Sidebar Directory Scan Cache](#phase-4-sidebar-directory-scan-cache)
 
 ---
 
@@ -219,11 +219,11 @@ After:   height_accum(200 paragraphs) → O(200 additions)
 
 **Files**: [app_state.rs](../desktop/crates/octodocs-app/src/app_state.rs)
 
-- [ ] **3.1** Add `load_generation: u64` field to `AppState`, initialized to `0`.
-- [ ] **3.2** At the start of `pull_and_open_file()`, increment `self.load_generation` and capture it as `let expected_gen = self.load_generation` before spawning the background task.
-- [ ] **3.3** The background task captures `expected_gen`. Before calling `this.update(cx, |state, cx| ...)`, check: if `state.load_generation != expected_gen`, log a trace message and return without calling `load_document_parsed`. This discards stale results silently.
-- [ ] **3.4** Update the GitHub pull path, the local open path, and the error fallback path — all three branches inside `pull_and_open_file()` need the generation guard.
-- [ ] **3.5** Ensure `_pull_task` replacement (the `self._pull_task = Some(cx.spawn(...))` assignment) still cancels any in-flight GPUI task, which GPUI does automatically when the `Task` handle is dropped. The generation counter is a second layer of defense for tasks that have already completed their async work but not yet called `this.update`.
+- [x] **3.1** Add `load_generation: u64` field to `AppState`, initialized to `0`.
+- [x] **3.2** At the start of `pull_and_open_file()`, increment `self.load_generation` and capture it as `let expected_gen = self.load_generation` before spawning the background task.
+- [x] **3.3** The background task captures `expected_gen`. Before calling `this.update(cx, |state, cx| ...)`, check: if `state.load_generation != expected_gen`, log a trace message and return without calling `load_document_parsed`. This discards stale results silently.
+- [x] **3.4** Update the GitHub pull path, the local open path, and the error fallback path — all three branches inside `pull_and_open_file()` need the generation guard.
+- [x] **3.5** Ensure `_pull_task` replacement (the `self._pull_task = Some(cx.spawn(...))` assignment) still cancels any in-flight GPUI task, which GPUI does automatically when the `Task` handle is dropped. The generation counter is a second layer of defense for tasks that have already completed their async work but not yet called `this.update`.
 
 ---
 
@@ -233,14 +233,14 @@ After:   height_accum(200 paragraphs) → O(200 additions)
 
 **Files**: [github_sidebar.rs](../desktop/crates/octodocs-app/src/views/github_sidebar.rs)
 
-- [ ] **4.1** Add `entries_cache: Option<Vec<ExplorerEntry>>` field to `GithubSidebar` (or the relevant tree-row struct).
-- [ ] **4.2** Move `list_entries()` (or equivalent `read_dir` call) out of `render()` / `push_tree_rows()`. Instead, call it once during `GithubSidebar::new()` and cache the result in `entries_cache`.
-- [ ] **4.3** Add an `invalidate_entries_cache(&mut self)` method. Call it from:
+- [x] **4.1** Add `entries_cache: Option<Vec<ExplorerEntry>>` field to `GithubSidebar` (or the relevant tree-row struct).
+- [x] **4.2** Move `list_entries()` (or equivalent `read_dir` call) out of `render()` / `push_tree_rows()`. Instead, call it once during `GithubSidebar::new()` and cache the result in `entries_cache`.
+- [x] **4.3** Add an `invalidate_entries_cache(&mut self)` method. Call it from:
   - `open_file_from_sidebar()` after a successful file open (directory may have changed if a pull created new files)
   - GitHub sync complete callback (new files may have been pulled)
   - Any future file-save path that creates new files
-- [ ] **4.4** On invalidation, schedule a background re-scan via `cx.spawn(background_executor.spawn(read_dir(...)))` that writes back to `entries_cache` and calls `cx.notify()`. Do not block the UI thread on the re-scan.
-- [ ] **4.5** During the re-scan window, render from stale cache (entries may be slightly outdated for <100 ms — acceptable).
+- [x] **4.4** On invalidation, schedule a background re-scan via `cx.spawn(background_executor.spawn(read_dir(...)))` that writes back to `entries_cache` and calls `cx.notify()`. Do not block the UI thread on the re-scan.
+- [x] **4.5** During the re-scan window, render from stale cache (entries may be slightly outdated for <100 ms — acceptable).
 
 ---
 

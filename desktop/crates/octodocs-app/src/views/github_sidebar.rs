@@ -1,6 +1,6 @@
 //! GitHub Sidebar — repo selector shell and add-repo entrypoint.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -38,6 +38,8 @@ pub struct GithubSidebar {
     app_state: Entity<AppState>,
     repo_dropdown_open: bool,
     expanded_dirs: HashSet<PathBuf>,
+    entries_cache: HashMap<PathBuf, Vec<ExplorerEntry>>,
+    refreshing_dirs: HashSet<PathBuf>,
     focused_dir: Option<PathBuf>,
     selected_file: Option<PathBuf>,
     file_context_menu: Option<(PathBuf, Point<Pixels>)>,
@@ -56,6 +58,8 @@ impl GithubSidebar {
             app_state,
             repo_dropdown_open: false,
             expanded_dirs: HashSet::new(),
+            entries_cache: HashMap::new(),
+            refreshing_dirs: HashSet::new(),
             focused_dir: None,
             selected_file: None,
             file_context_menu: None,
@@ -122,6 +126,13 @@ impl GithubSidebar {
                 state.sync_rename_to_github(target.clone(), new_path.clone(), cx);
                 cx.notify();
             });
+
+            if let Some(parent) = target.parent() {
+                self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
+            }
+            if let Some(parent) = new_path.parent() {
+                self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
+            }
         }
 
         self.rename_target = None;
@@ -156,6 +167,10 @@ impl GithubSidebar {
             return;
         }
 
+        if let Some(parent) = source.parent() {
+            self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
+        }
+
         self.selected_file = Some(candidate.clone());
         self.begin_rename_file(candidate, cx);
     }
@@ -168,6 +183,10 @@ impl GithubSidebar {
         if let Err(err) = std::fs::remove_file(&target) {
             eprintln!("Delete error: {err}");
             return;
+        }
+
+        if let Some(parent) = target.parent() {
+            self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
         }
 
         if self.selected_file.as_ref() == Some(&target) {
@@ -239,12 +258,17 @@ impl GithubSidebar {
             return;
         }
 
-        self.expanded_dirs.insert(target.parent);
+        let parent_dir = target.parent.clone();
+        self.expanded_dirs.insert(parent_dir.clone());
+        self.invalidate_entries_cache(Some(parent_dir), cx);
+        if matches!(target.kind, CreateKind::Folder) {
+            self.invalidate_entries_cache(Some(full_path), cx);
+        }
         self.create_target = None;
         cx.notify();
     }
 
-    fn list_entries(&self, dir: &Path) -> Vec<ExplorerEntry> {
+    fn scan_entries(dir: &Path) -> Vec<ExplorerEntry> {
         let Ok(read_dir) = std::fs::read_dir(dir) else {
             return vec![];
         };
@@ -282,6 +306,84 @@ impl GithubSidebar {
         entries
     }
 
+    fn list_entries(&self, dir: &Path) -> Vec<ExplorerEntry> {
+        self.entries_cache.get(dir).cloned().unwrap_or_default()
+    }
+
+    fn refresh_entries_for_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.refreshing_dirs.contains(&dir) {
+            return;
+        }
+        self.refreshing_dirs.insert(dir.clone());
+
+        cx.spawn(async move |this, cx| {
+            let refresh_dir = dir.clone();
+            let entries = cx
+                .background_executor()
+                .spawn(async move { Self::scan_entries(&refresh_dir) })
+                .await;
+
+            let _ = this.update(cx, |sidebar, cx| {
+                sidebar.entries_cache.insert(dir.clone(), entries);
+                sidebar.refreshing_dirs.remove(&dir);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn invalidate_entries_cache(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        match dir {
+            Some(dir) => {
+                self.entries_cache.remove(&dir);
+                self.refresh_entries_for_dir(dir, cx);
+            }
+            None => {
+                self.entries_cache.clear();
+                self.refreshing_dirs.clear();
+                if let Some(root) = self.current_local_root(cx) {
+                    self.refresh_entries_for_dir(root.clone(), cx);
+                    let expanded: Vec<PathBuf> = self
+                        .expanded_dirs
+                        .iter()
+                        .filter(|p| p.starts_with(&root))
+                        .cloned()
+                        .collect();
+                    for dir in expanded {
+                        self.refresh_entries_for_dir(dir, cx);
+                    }
+                }
+            }
+        }
+    }
+
+    fn current_local_root(&self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        let app = self.app_state.read(cx);
+        let idx = self.active_index(app.github_bindings.len(), app.active_binding_idx)?;
+        app.github_bindings.get(idx).map(|b| b.local_root.clone())
+    }
+
+    fn ensure_visible_dirs_cached(&mut self, local_root: &Path, cx: &mut Context<Self>) {
+        if !self.entries_cache.contains_key(local_root)
+            && !self.refreshing_dirs.contains(local_root)
+        {
+            self.refresh_entries_for_dir(local_root.to_path_buf(), cx);
+        }
+
+        let expanded: Vec<PathBuf> = self
+            .expanded_dirs
+            .iter()
+            .filter(|p| p.starts_with(local_root))
+            .cloned()
+            .collect();
+
+        for dir in expanded {
+            if !self.entries_cache.contains_key(&dir) && !self.refreshing_dirs.contains(&dir) {
+                self.refresh_entries_for_dir(dir, cx);
+            }
+        }
+    }
+
     fn push_tree_rows(
         &self,
         dir: &Path,
@@ -314,6 +416,7 @@ impl GithubSidebar {
                                     sidebar.expanded_dirs.remove(&path);
                                 } else {
                                     sidebar.expanded_dirs.insert(path.clone());
+                                    sidebar.refresh_entries_for_dir(path.clone(), cx);
                                 }
                                 cx.notify();
                             });
@@ -416,6 +519,7 @@ impl GithubSidebar {
                                     if ext == "md" {
                                         // Defer open to the next tick so the selection highlight
                                         // is painted before any state transitions for loading begin.
+                                        sidebar.invalidate_entries_cache(None, cx);
                                         let app_state = sidebar.app_state.clone();
                                         let path = path_for_left.clone();
                                         cx.spawn(async move |_, cx| {
@@ -497,6 +601,7 @@ impl GithubSidebar {
             self.focused_dir = Some(root);
             self.expanded_dirs.clear();
         }
+        self.invalidate_entries_cache(None, cx);
         self.repo_dropdown_open = false;
         cx.notify();
     }
@@ -710,6 +815,7 @@ impl Render for GithubSidebar {
             if !local_root.exists() {
                 let _ = std::fs::create_dir_all(&local_root);
             }
+            self.ensure_visible_dirs_cached(&local_root, cx);
             let mut rows = Vec::new();
             // Pass the currently-open document path so every render cycle the active
             // file is highlighted regardless of how it was opened.
