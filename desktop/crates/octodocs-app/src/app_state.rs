@@ -80,6 +80,8 @@ pub enum UpdateStatus {
     Done,
 }
 
+type PullAndOpenResult = (bool, Document, Vec<DocParagraph>, Vec<DocumentBlock>, String);
+
 /// Central application state — one entity shared by all views.
 pub struct AppState {
     pub document: Document,
@@ -731,7 +733,7 @@ impl AppState {
         self._pull_task = Some(cx.spawn(async move |this, cx| {
             let path_fallback = path.clone();
 
-            let result: anyhow::Result<(bool, Document, Vec<DocParagraph>, Vec<DocumentBlock>, String)> = cx
+            let result: anyhow::Result<PullAndOpenResult> = cx
                 .background_executor()
                 .spawn(async move {
                     let token = octodocs_github::get_stored_token().ok().flatten();
