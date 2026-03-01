@@ -44,6 +44,34 @@ impl AssetSource for Assets {
     }
 }
 
+/// Detect whether the system is currently in dark mode.
+/// On Linux, GPUI's `window.appearance()` always returns `Light` because GPUI
+/// does not read GTK/GNOME preferences. We fall back to querying `gsettings`.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_is_dark_mode() -> bool {
+    // Prefer the modern color-scheme key (GNOME 42+)
+    if let Ok(out) = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        if s.contains("dark") {
+            return true;
+        }
+    }
+    // Fall back to checking the GTK theme name
+    if let Ok(out) = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "gtk-theme"])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        if s.contains("dark") {
+            return true;
+        }
+    }
+    false
+}
+
 fn main() {
     let _ = dotenvy::dotenv();
 
@@ -73,6 +101,17 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
+                    // On Linux, GPUI never reports dark mode via window.appearance();
+                    // query gsettings as a fallback instead.
+                    #[cfg(target_os = "linux")]
+                    let initial_is_dark = {
+                        let from_gpui = matches!(
+                            window.appearance(),
+                            WindowAppearance::Dark | WindowAppearance::VibrantDark
+                        );
+                        if from_gpui { true } else { linux_is_dark_mode() }
+                    };
+                    #[cfg(not(target_os = "linux"))]
                     let initial_is_dark = matches!(
                         window.appearance(),
                         WindowAppearance::Dark | WindowAppearance::VibrantDark

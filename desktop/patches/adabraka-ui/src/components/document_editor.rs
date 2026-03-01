@@ -13,10 +13,11 @@ use octodocs_core::{
 };
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::cell::RefCell;
-use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, RwLock};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Actions
@@ -160,6 +161,16 @@ pub struct DocumentEditorState {
     /// Populated each paint pass; used by request_layout/prepaint to size the
     /// scroll area correctly after word-wrap is computed.
     pub para_visual_heights: Vec<f32>,
+    /// Whether the mouse is hovering a link span (drives pointer cursor).
+    pub hovered_link: bool,
+    /// Set to Some(path) by a link click on a local .md file; the host app should
+    /// consume this in its doc_editor observer and navigate to that document.
+    pub navigate_request: Option<String>,
+    /// Shared image decode cache: abs path → decoded BGRA RenderImage.
+    /// Populated asynchronously by background tasks; paint reads without blocking.
+    pub image_cache: Arc<RwLock<HashMap<String, Arc<RenderImage>>>>,
+    /// In-flight decode keys so we don't spawn duplicate tasks.
+    pub pending_images: HashSet<String>,
 }
 
 impl DocumentEditorState {
@@ -181,6 +192,10 @@ impl DocumentEditorState {
             hovered_image_para: None,
             hovered_mermaid_para: None,
             para_visual_heights: Vec::new(),
+            hovered_link: false,
+            navigate_request: None,
+            image_cache: Arc::new(RwLock::new(HashMap::new())),
+            pending_images: HashSet::new(),
         }
     }
 
@@ -194,9 +209,13 @@ impl DocumentEditorState {
         self.image_zoom = None;
         self.hovered_image_para = None;
         self.hovered_mermaid_para = None;
+        self.hovered_link = false;
+        self.navigate_request = None;
         self.para_visual_heights.clear();
         self.drag_occurred = false;
         self.table_cursor = None;
+        self.image_cache = Arc::new(RwLock::new(HashMap::new()));
+        self.pending_images.clear();
         IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_DIMS_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -215,6 +234,44 @@ impl DocumentEditorState {
             paragraphs
         };
         self.reset_transient_state();
+        // Spawn background decode for every image paragraph so paint never blocks.
+        let doc_dir = self.document_dir.clone();
+        for para in &self.paragraphs {
+            if let ParagraphKind::Image { path, .. } = &para.kind {
+                let abs_path = doc_dir
+                    .as_ref()
+                    .map(|d| d.join(path.as_str()))
+                    .unwrap_or_else(|| PathBuf::from(path.as_str()));
+                let cache_key = abs_path.to_string_lossy().to_string();
+                if !self.pending_images.insert(cache_key.clone()) {
+                    continue; // already queued
+                }
+                let cache_ref = self.image_cache.clone();
+                cx.spawn(async move |this, cx| {
+                    let ri = cx
+                        .background_executor()
+                        .spawn(async move {
+                            std::fs::read(&abs_path).ok()
+                                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                                .map(|dyn_img| {
+                                    let mut rgba = dyn_img.into_rgba8();
+                                    for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                    Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                                })
+                        })
+                        .await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.pending_images.remove(&cache_key);
+                        if let Some(image) = ri {
+                            if let Ok(mut c) = cache_ref.write() {
+                                c.insert(cache_key, image);
+                            }
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+            }
+        }
         cx.notify();
     }
 
@@ -252,7 +309,7 @@ impl DocumentEditorState {
                 continue;
             }
             if let Some(last) = merged.last_mut() {
-                if last.format == span.format {
+                if last.format == span.format && last.link_url == span.link_url {
                     last.text.push_str(&span.text);
                     continue;
                 }
@@ -264,6 +321,7 @@ impl DocumentEditorState {
             merged.push(InlineSpan {
                 text: String::new(),
                 format: InlineFormat::Plain,
+                link_url: None,
             });
         }
         *spans = merged;
@@ -296,11 +354,13 @@ impl DocumentEditorState {
                 right.push(InlineSpan {
                     text: span.text.clone(),
                     format: span.format,
+                    link_url: span.link_url.clone(),
                 });
             } else if at >= span_end {
                 left.push(InlineSpan {
                     text: span.text.clone(),
                     format: span.format,
+                    link_url: span.link_url.clone(),
                 });
             } else {
                 let split_at = at - span_start;
@@ -309,12 +369,14 @@ impl DocumentEditorState {
                     left.push(InlineSpan {
                         text: before,
                         format: span.format,
+                        link_url: span.link_url.clone(),
                     });
                 }
                 if !after.is_empty() {
                     right.push(InlineSpan {
                         text: after,
                         format: span.format,
+                        link_url: span.link_url.clone(),
                     });
                 }
             }
@@ -339,10 +401,13 @@ impl DocumentEditorState {
             .map(|s| s.format)
             .or_else(|| right.first().map(|s| s.format))
             .unwrap_or(InlineFormat::Plain);
+        // Do not propagate Link format when typing — new characters should be Plain.
+        let insertion_format = if insertion_format == InlineFormat::Link { InlineFormat::Plain } else { insertion_format };
 
         left.push(InlineSpan {
             text: text.to_string(),
             format: insertion_format,
+            link_url: None,
         });
         left.append(&mut right);
         Self::merge_adjacent_spans(&mut left);
@@ -368,7 +433,7 @@ impl DocumentEditorState {
     }
 
     /// Get selected text as a String (or empty if no selection).
-    fn selected_text(&self) -> String {
+    pub fn selected_text(&self) -> String {
         let Some(sel) = self.selection else { return String::new(); };
         let (start, end) = sel.ordered();
         if start.para_idx == end.para_idx {
@@ -390,6 +455,100 @@ impl DocumentEditorState {
             s.extend(last_flat.chars().take(end.char_offset));
             s
         }
+    }
+
+    /// Insert (or replace selection with) a hyperlink span.
+    pub fn insert_link(&mut self, text: String, url: String, cx: &mut Context<Self>) {
+        // Delete any active selection first (including multi-paragraph) so the
+        // link reliably replaces whatever is selected.
+        if self.selection.is_some() {
+            self.cursor = self.delete_selection(cx);
+        }
+        let at = self.cursor;
+        let para = &mut self.paragraphs[at.para_idx];
+        let (mut left, mut right) = Self::split_spans_at_char(&para.spans, at.char_offset);
+        left.push(InlineSpan { text: text.clone(), format: InlineFormat::Link, link_url: Some(url) });
+        left.append(&mut right);
+        Self::merge_adjacent_spans(&mut left);
+        para.spans = left;
+        self.cursor = DocCursor {
+            para_idx: at.para_idx,
+            char_offset: at.char_offset + text.chars().count(),
+        };
+        cx.notify();
+    }
+
+    /// Return the link URL for the span that contains the character at `char_offset - 1`
+    /// (i.e., the character the user clicked on or is positioned just after).
+    pub fn link_url_at_offset(&self, para_idx: usize, char_offset: usize) -> Option<String> {
+        let para = self.paragraphs.get(para_idx)?;
+        // char_offset is a gap position; the clicked char is at offset-1 (or 0 at start).
+        let check = if char_offset > 0 { char_offset - 1 } else { 0 };
+        let mut pos = 0usize;
+        for span in &para.spans {
+            let len = span.text.chars().count();
+            if check >= pos && check < pos + len.max(1) {
+                return if span.format == InlineFormat::Link { span.link_url.clone() } else { None };
+            }
+            pos += len;
+        }
+        None
+    }
+
+    /// If the word immediately before the cursor looks like a URL
+    /// (starts with `http://` or `https://`), convert it in-place to a Link span.
+    /// Called automatically by `insert_text` when the user types a space or Enter.
+    fn try_autolink(&mut self) {
+        let para_idx = self.cursor.para_idx;
+        if !matches!(
+            self.paragraphs[para_idx].kind,
+            ParagraphKind::Paragraph | ParagraphKind::Heading(_)
+        ) {
+            return;
+        }
+        let flat = self.paragraphs[para_idx].plain_text();
+        let chars_before: Vec<char> = flat.chars().take(self.cursor.char_offset).collect();
+        if chars_before.is_empty() {
+            return;
+        }
+        // Position after the last whitespace character = start of the last word.
+        let word_start = chars_before
+            .iter()
+            .rposition(|&c| c == ' ' || c == '\n' || c == '\t')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if word_start >= chars_before.len() {
+            return;
+        }
+        let word: String = chars_before[word_start..].iter().collect();
+        if !word.starts_with("http://") && !word.starts_with("https://") {
+            return;
+        }
+        // Skip if the span at word_start is already a Link.
+        {
+            let mut pos = 0usize;
+            for span in &self.paragraphs[para_idx].spans {
+                let len = span.text.chars().count();
+                if word_start < pos + len {
+                    if span.format == InlineFormat::Link {
+                        return;
+                    }
+                    break;
+                }
+                pos += len;
+            }
+        }
+        // Replace [word_start, cursor.char_offset) with a Link span.
+        let url = word.clone();
+        let para = &mut self.paragraphs[para_idx];
+        let (left_all, right) = Self::split_spans_at_char(&para.spans, self.cursor.char_offset);
+        let (before_word, _) = Self::split_spans_at_char(&left_all, word_start);
+        let mut new_spans = before_word;
+        new_spans.push(InlineSpan { text: url.clone(), format: InlineFormat::Link, link_url: Some(url) });
+        new_spans.extend(right);
+        Self::merge_adjacent_spans(&mut new_spans);
+        para.spans = new_spans;
+        // cursor.char_offset stays the same — total char count did not change.
     }
 
     /// Delete the current selection, return new cursor position (at selection start).
@@ -663,9 +822,17 @@ impl DocumentEditorState {
             }
         }
         // ────────────────────────────────────────────────────────────────────────
+        let had_selection = self.selection.is_some();
         if let Some(_) = self.selection {
             let at = self.delete_selection(cx);
             self.cursor = at;
+        }
+
+        // URL auto-linking: when the user types a space or Enter without an active
+        // selection, check whether the word just before the cursor is a bare URL
+        // and convert it to a Link span automatically.
+        if !had_selection && (text == " " || text == "\n") {
+            self.try_autolink();
         }
 
         if text == "\n" {
@@ -896,12 +1063,46 @@ impl DocumentEditorState {
     /// Insert an image paragraph after the current cursor position.
     pub fn insert_image_at_cursor(&mut self, path: String, alt: String, cx: &mut Context<Self>) {
         let para = DocParagraph {
-            kind: ParagraphKind::Image { path, alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
-            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+            kind: ParagraphKind::Image { path: path.clone(), alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
         };
         let insert_at = self.cursor.para_idx + 1;
         self.paragraphs.insert(insert_at, para);
         self.cursor = DocCursor { para_idx: insert_at, char_offset: 0 };
+
+        // Kick off background decode for the newly inserted image.
+        let abs_path = self.document_dir
+            .as_ref()
+            .map(|d| d.join(&path))
+            .unwrap_or_else(|| PathBuf::from(&path));
+        let cache_key = abs_path.to_string_lossy().to_string();
+        if self.pending_images.insert(cache_key.clone()) {
+            let cache_ref = self.image_cache.clone();
+            cx.spawn(async move |this, cx| {
+                let ri = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::fs::read(&abs_path).ok()
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|dyn_img| {
+                                let mut rgba = dyn_img.into_rgba8();
+                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                            })
+                    })
+                    .await;
+                let _ = this.update(cx, |s, cx| {
+                    s.pending_images.remove(&cache_key);
+                    if let Some(image) = ri {
+                        if let Ok(mut c) = cache_ref.write() {
+                            c.insert(cache_key, image);
+                        }
+                    }
+                    cx.notify();
+                });
+            }).detach();
+        }
+
         cx.notify();
     }
 
@@ -974,7 +1175,7 @@ impl DocumentEditorState {
                 if end_clip > span_start {
                     let text: String = flat.chars().skip(span_start).take(end_clip - span_start).collect();
                     if !text.is_empty() {
-                        new_spans.push(InlineSpan { text, format: span.format });
+                        new_spans.push(InlineSpan { text, format: span.format, link_url: span.link_url.clone() });
                     }
                 }
             }
@@ -986,7 +1187,7 @@ impl DocumentEditorState {
                 let text: String = flat.chars().skip(overlap_start).take(overlap_end - overlap_start).collect();
                 if !text.is_empty() {
                     let new_fmt = if has_non_fmt { fmt } else { InlineFormat::Plain };
-                    new_spans.push(InlineSpan { text, format: new_fmt });
+                    new_spans.push(InlineSpan { text, format: new_fmt, link_url: None });
                 }
             }
 
@@ -996,7 +1197,7 @@ impl DocumentEditorState {
                 if start_clip < span_end {
                     let text: String = flat.chars().skip(start_clip).take(span_end - start_clip).collect();
                     if !text.is_empty() {
-                        new_spans.push(InlineSpan { text, format: span.format });
+                        new_spans.push(InlineSpan { text, format: span.format, link_url: span.link_url.clone() });
                     }
                 }
             }
@@ -1026,7 +1227,7 @@ impl DocumentEditorState {
         ];
         let para = DocParagraph {
             kind: ParagraphKind::Table { source, headers, rows },
-            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }],
+            spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
         };
         let insert_at = self.cursor.para_idx + 1;
         self.paragraphs.insert(insert_at, para);
@@ -1565,6 +1766,22 @@ fn table_height(headers: &[String], rows: &[Vec<String>]) -> f32 {
     TABLE_ROW_H * (1 + rows.len()) as f32 + 2.0
 }
 
+/// Open a URL or local file path using the system default handler.
+fn open_url(url: &str) {
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    // Use rundll32 instead of `cmd /C start` to avoid shell-metacharacter injection.
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
+    // Silence unused-variable warning on unsupported platforms
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let _ = url;
+}
+
 fn para_font_size(kind: &ParagraphKind) -> f32 {
     match kind {
         ParagraphKind::Heading(1) => 26.0,
@@ -1605,7 +1822,7 @@ fn coalesce_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
             continue;
         }
         if let Some(last) = merged.last_mut() {
-            if last.format == span.format {
+            if last.format == span.format && last.link_url == span.link_url {
                 last.text.push_str(&span.text);
                 continue;
             }
@@ -1614,7 +1831,7 @@ fn coalesce_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
     }
 
     if merged.is_empty() {
-        vec![InlineSpan { text: String::new(), format: InlineFormat::Plain }]
+        vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }]
     } else {
         merged
     }
@@ -1688,6 +1905,7 @@ fn span_font(format: InlineFormat, base_font: &Font, mono_font_family: &SharedSt
             style: FontStyle::Normal,
             ..base_font.clone()
         },
+        InlineFormat::Link => base_font.clone(),
     }
 }
 
@@ -1735,6 +1953,7 @@ fn spans_to_text_runs(
         let color = match span.format {
             InlineFormat::Code => code_color,
             InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
+            InlineFormat::Link => blue(),
             InlineFormat::Plain => base_color,
         };
 
@@ -1742,6 +1961,11 @@ fn spans_to_text_runs(
             InlineFormat::Underline => Some(UnderlineStyle {
                 thickness: px(1.0),
                 color: Some(emphasis_color),
+                wavy: false,
+            }),
+            InlineFormat::Link => Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(blue()),
                 wavy: false,
             }),
             _ => None,
@@ -1901,6 +2125,14 @@ impl Element for DocumentEditorElement {
         cx: &mut App,
     ) {
         let focus_handle = self.state.read(cx).focus_handle.clone();
+
+        // Set pointer cursor when hovering a link span (must be called during paint).
+        let hovered_link = self.state.read(cx).hovered_link;
+        window.set_window_cursor_style(if hovered_link {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::default()
+        });
 
         // Register input handler (must happen in paint)
         window.handle_input(
@@ -2127,6 +2359,7 @@ impl Element for DocumentEditorElement {
                             glyph_xs: vec![],
                         });
                         line_layouts.push(None);
+                        para_visual_heights.push(display_h);
                         current_y += display_h + PARA_GAP;
                     } else {
                         // Fallback placeholder when rendering failed.
@@ -2167,6 +2400,7 @@ impl Element for DocumentEditorElement {
                             glyph_xs: vec![],
                         });
                         line_layouts.push(None);
+                        para_visual_heights.push(display_h);
                         current_y += display_h + PARA_GAP;
                     }
                     continue;
@@ -2196,25 +2430,12 @@ impl Element for DocumentEditorElement {
                         .unwrap_or_else(|| PathBuf::from(path.as_str()));
                     let cache_key = abs_path.to_string_lossy().to_string();
 
-                    // Decode image once, cache forever in thread-local storage.
-                    let render_image: Option<Arc<RenderImage>> = IMAGE_CACHE.with(|cache| {
-                        let mut map = cache.borrow_mut();
-                        if let Some(ri) = map.get(&cache_key) {
-                            return Some(ri.clone());
-                        }
-                        let ri = std::fs::read(&abs_path).ok()
-                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
-                            .map(|dyn_img| {
-                                let mut rgba = dyn_img.into_rgba8();
-                                // GPUI requires BGRA: swap R and B channels.
-                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
-                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
-                            });
-                        if let Some(ri) = &ri {
-                            map.insert(cache_key, ri.clone());
-                        }
-                        ri
-                    });
+                    // Read from the async-populated cache; never decode on the UI thread.
+                    let render_image: Option<Arc<RenderImage>> = self.state.read(cx)
+                        .image_cache
+                        .read()
+                        .ok()
+                        .and_then(|c| c.get(&cache_key).cloned());
 
                     let top_screen = bounds.top() + px(current_y);
                     let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
@@ -2314,6 +2535,7 @@ impl Element for DocumentEditorElement {
                         glyph_xs: vec![],
                     });
                     line_layouts.push(None);
+                    para_visual_heights.push(img_height);
                     current_y += img_height + PARA_GAP;
                     continue;
                 }
@@ -2495,6 +2717,7 @@ impl Element for DocumentEditorElement {
                         glyph_xs: vec![],
                     });
                     line_layouts.push(None);
+                    para_visual_heights.push(th);
                     current_y += th + PARA_GAP;
                     continue;
                 }
@@ -3083,6 +3306,27 @@ impl RenderOnce for DocumentEditor {
                     return;
                 }
 
+                // Track link hover for pointer cursor.
+                {
+                    let new_hovered_link = {
+                        let s = state_move.read(cx);
+                        if !s.layout_cache.is_empty() {
+                            let b = s.last_bounds.unwrap_or_default();
+                            let hover_cursor = s.cursor_from_point(event.position, b);
+                            s.link_url_at_offset(hover_cursor.para_idx, hover_cursor.char_offset).is_some()
+                        } else {
+                            false
+                        }
+                    };
+                    let prev_link = state_move.read(cx).hovered_link;
+                    if prev_link != new_hovered_link {
+                        state_move.update(cx, |s, cx| {
+                            s.hovered_link = new_hovered_link;
+                            cx.notify();
+                        });
+                    }
+                }
+
                 // Track which image/mermaid block (if any) the cursor is hovering over.
                 {
                     let (new_image_hovered, new_mermaid_hovered) = {
@@ -3148,6 +3392,24 @@ impl RenderOnce for DocumentEditor {
                     if s.image_resize_drag.take().is_some() {
                         cx.notify();
                         return;
+                    }
+                    // Plain click (no drag): open link if the cursor landed on a Link span.
+                    if !s.drag_occurred {
+                        if let Some(url) = s.link_url_at_offset(s.cursor.para_idx, s.cursor.char_offset) {
+                            if url.starts_with("http://") || url.starts_with("https://") {
+                                open_url(&url);
+                            } else {
+                                // Local .md link — ask the host app to navigate.
+                                // Only resolve when a base directory is known; otherwise
+                                // require an absolute path to avoid CWD-relative surprises.
+                                if let Some(dir) = s.document_dir.as_ref() {
+                                    let resolved = dir.join(&url).to_string_lossy().into_owned();
+                                    s.navigate_request = Some(resolved);
+                                } else if std::path::Path::new(&url).is_absolute() {
+                                    s.navigate_request = Some(url);
+                                }
+                            }
+                        }
                     }
                     // Plain click clears selection; completed drag preserves it.
                     if !s.drag_occurred {

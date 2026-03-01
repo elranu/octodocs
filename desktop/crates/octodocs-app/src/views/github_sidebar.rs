@@ -519,7 +519,6 @@ impl GithubSidebar {
                                     if ext == "md" {
                                         // Defer open to the next tick so the selection highlight
                                         // is painted before any state transitions for loading begin.
-                                        sidebar.invalidate_entries_cache(None, cx);
                                         let app_state = sidebar.app_state.clone();
                                         let path = path_for_left.clone();
                                         cx.spawn(async move |_, cx| {
