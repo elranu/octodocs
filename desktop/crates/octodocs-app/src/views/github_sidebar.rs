@@ -1,7 +1,8 @@
 //! GitHub Sidebar — repo selector shell and add-repo entrypoint.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::components::input::Input;
@@ -37,8 +38,11 @@ pub struct GithubSidebar {
     app_state: Entity<AppState>,
     repo_dropdown_open: bool,
     expanded_dirs: HashSet<PathBuf>,
+    entries_cache: HashMap<PathBuf, Vec<ExplorerEntry>>,
+    refreshing_dirs: HashSet<PathBuf>,
     focused_dir: Option<PathBuf>,
     selected_file: Option<PathBuf>,
+    last_doc_path: Option<PathBuf>,
     file_context_menu: Option<(PathBuf, Point<Pixels>)>,
     rename_target: Option<PathBuf>,
     rename_input: Entity<InputState>,
@@ -55,8 +59,11 @@ impl GithubSidebar {
             app_state,
             repo_dropdown_open: false,
             expanded_dirs: HashSet::new(),
+            entries_cache: HashMap::new(),
+            refreshing_dirs: HashSet::new(),
             focused_dir: None,
             selected_file: None,
+            last_doc_path: None,
             file_context_menu: None,
             rename_target: None,
             rename_input,
@@ -121,6 +128,13 @@ impl GithubSidebar {
                 state.sync_rename_to_github(target.clone(), new_path.clone(), cx);
                 cx.notify();
             });
+
+            if let Some(parent) = target.parent() {
+                self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
+            }
+            if let Some(parent) = new_path.parent() {
+                self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
+            }
         }
 
         self.rename_target = None;
@@ -155,6 +169,10 @@ impl GithubSidebar {
             return;
         }
 
+        if let Some(parent) = source.parent() {
+            self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
+        }
+
         self.selected_file = Some(candidate.clone());
         self.begin_rename_file(candidate, cx);
     }
@@ -167,6 +185,10 @@ impl GithubSidebar {
         if let Err(err) = std::fs::remove_file(&target) {
             eprintln!("Delete error: {err}");
             return;
+        }
+
+        if let Some(parent) = target.parent() {
+            self.invalidate_entries_cache(Some(parent.to_path_buf()), cx);
         }
 
         if self.selected_file.as_ref() == Some(&target) {
@@ -238,12 +260,17 @@ impl GithubSidebar {
             return;
         }
 
-        self.expanded_dirs.insert(target.parent);
+        let parent_dir = target.parent.clone();
+        self.expanded_dirs.insert(parent_dir.clone());
+        self.invalidate_entries_cache(Some(parent_dir), cx);
+        if matches!(target.kind, CreateKind::Folder) {
+            self.invalidate_entries_cache(Some(full_path), cx);
+        }
         self.create_target = None;
         cx.notify();
     }
 
-    fn list_entries(&self, dir: &Path) -> Vec<ExplorerEntry> {
+    fn scan_entries(dir: &Path) -> Vec<ExplorerEntry> {
         let Ok(read_dir) = std::fs::read_dir(dir) else {
             return vec![];
         };
@@ -281,6 +308,84 @@ impl GithubSidebar {
         entries
     }
 
+    fn list_entries(&self, dir: &Path) -> Vec<ExplorerEntry> {
+        self.entries_cache.get(dir).cloned().unwrap_or_default()
+    }
+
+    fn refresh_entries_for_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.refreshing_dirs.contains(&dir) {
+            return;
+        }
+        self.refreshing_dirs.insert(dir.clone());
+
+        cx.spawn(async move |this, cx| {
+            let refresh_dir = dir.clone();
+            let entries = cx
+                .background_executor()
+                .spawn(async move { Self::scan_entries(&refresh_dir) })
+                .await;
+
+            let _ = this.update(cx, |sidebar, cx| {
+                sidebar.entries_cache.insert(dir.clone(), entries);
+                sidebar.refreshing_dirs.remove(&dir);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn invalidate_entries_cache(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        match dir {
+            Some(dir) => {
+                self.entries_cache.remove(&dir);
+                self.refresh_entries_for_dir(dir, cx);
+            }
+            None => {
+                self.entries_cache.clear();
+                self.refreshing_dirs.clear();
+                if let Some(root) = self.current_local_root(cx) {
+                    self.refresh_entries_for_dir(root.clone(), cx);
+                    let expanded: Vec<PathBuf> = self
+                        .expanded_dirs
+                        .iter()
+                        .filter(|p| p.starts_with(&root))
+                        .cloned()
+                        .collect();
+                    for dir in expanded {
+                        self.refresh_entries_for_dir(dir, cx);
+                    }
+                }
+            }
+        }
+    }
+
+    fn current_local_root(&self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        let app = self.app_state.read(cx);
+        let idx = self.active_index(app.github_bindings.len(), app.active_binding_idx)?;
+        app.github_bindings.get(idx).map(|b| b.local_root.clone())
+    }
+
+    fn ensure_visible_dirs_cached(&mut self, local_root: &Path, cx: &mut Context<Self>) {
+        if !self.entries_cache.contains_key(local_root)
+            && !self.refreshing_dirs.contains(local_root)
+        {
+            self.refresh_entries_for_dir(local_root.to_path_buf(), cx);
+        }
+
+        let expanded: Vec<PathBuf> = self
+            .expanded_dirs
+            .iter()
+            .filter(|p| p.starts_with(local_root))
+            .cloned()
+            .collect();
+
+        for dir in expanded {
+            if !self.entries_cache.contains_key(&dir) && !self.refreshing_dirs.contains(&dir) {
+                self.refresh_entries_for_dir(dir, cx);
+            }
+        }
+    }
+
     fn push_tree_rows(
         &self,
         dir: &Path,
@@ -313,6 +418,7 @@ impl GithubSidebar {
                                     sidebar.expanded_dirs.remove(&path);
                                 } else {
                                     sidebar.expanded_dirs.insert(path.clone());
+                                    sidebar.refresh_entries_for_dir(path.clone(), cx);
                                 }
                                 cx.notify();
                             });
@@ -348,8 +454,11 @@ impl GithubSidebar {
                 let indent = depth as f32 * 12.0;
                 let is_renaming = self.rename_target.as_ref() == Some(&path);
                 // Highlight when this row is the sidebar selection OR the currently open document.
-                let is_active = current_doc_path == Some(path.as_path());
-                let is_selected = is_active || self.selected_file.as_deref() == Some(path.as_path());
+                let pending_selected = self.selected_file.as_deref();
+                let has_pending_switch = pending_selected.is_some() && pending_selected != current_doc_path;
+                let is_active = current_doc_path == Some(path.as_path()) && !has_pending_switch;
+                let is_selected = pending_selected == Some(path.as_path()) || is_active;
+                let is_pending_loading = has_pending_switch && pending_selected == Some(path.as_path());
 
                 if is_renaming {
                     let rename_weak = weak.clone();
@@ -389,7 +498,11 @@ impl GithubSidebar {
                             .py(px(4.0))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.tokens.accent))
-                            .when(is_selected && !is_active, |s| s.bg(theme.tokens.accent.opacity(0.5)))
+                            .when(is_selected && !is_active, |s| {
+                                s.bg(theme.tokens.accent)
+                                    .border_l_2()
+                                    .border_color(theme.tokens.primary.opacity(0.6))
+                            })
                             .when(is_active, |s| {
                                 s.bg(theme.tokens.accent)
                                     .border_l_2()
@@ -399,17 +512,29 @@ impl GithubSidebar {
                             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                 let _ = row_weak.update(cx, |sidebar, cx| {
                                     sidebar.selected_file = Some(path_for_left.clone());
+                                    cx.notify(); // highlight the row immediately, before the file finishes loading
                                     let ext = path_for_left
                                         .extension()
                                         .and_then(|e| e.to_str())
                                         .map(|e| e.to_ascii_lowercase())
                                         .unwrap_or_default();
                                     if ext == "md" {
-                                        sidebar.app_state.update(cx, |state, cx| {
-                                            state.open_file_from_sidebar(path_for_left.clone(), cx);
-                                        });
-                                    } else {
-                                        cx.notify();
+                                        // Defer open to the next tick so the selection highlight
+                                        // is painted before any state transitions for loading begin.
+                                        let app_state = sidebar.app_state.clone();
+                                        let path = path_for_left.clone();
+                                        cx.spawn(async move |_, cx| {
+                                            let _ = cx
+                                                .background_executor()
+                                                .spawn(async move {
+                                                    std::thread::sleep(Duration::from_millis(16));
+                                                })
+                                                .await;
+                                            let _ = app_state.update(cx, |state, cx| {
+                                                state.open_file_from_sidebar(path, cx);
+                                            });
+                                        })
+                                        .detach();
                                     }
                                 });
                             })
@@ -425,9 +550,22 @@ impl GithubSidebar {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.0))
-                                    .child(Icon::new(IconSource::Named("file".into())).size_3())
-                                    .child(body_small(name)),
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(Icon::new(IconSource::Named("file".into())).size_3())
+                                            .child(body_small(name)),
+                                    )
+                                    .when(is_pending_loading, |s| {
+                                        s.child(
+                                            Icon::new(IconSource::Named("loader".into()))
+                                                .size_3()
+                                                .color(theme.tokens.muted_foreground),
+                                        )
+                                    }),
                             )
                             .into_any_element(),
                     );
@@ -464,6 +602,7 @@ impl GithubSidebar {
             self.focused_dir = Some(root);
             self.expanded_dirs.clear();
         }
+        self.invalidate_entries_cache(None, cx);
         self.repo_dropdown_open = false;
         cx.notify();
     }
@@ -475,6 +614,11 @@ impl Render for GithubSidebar {
         let weak = cx.entity().downgrade();
 
         let app = self.app_state.read(cx);
+        let current_doc_path = app.document.path.clone();
+        if self.last_doc_path != current_doc_path {
+            self.last_doc_path = current_doc_path.clone();
+            self.selected_file = current_doc_path;
+        }
         let bindings = app.github_bindings.clone();
         let active_idx = self.active_index(bindings.len(), app.active_binding_idx);
         let _ = app;
@@ -677,6 +821,7 @@ impl Render for GithubSidebar {
             if !local_root.exists() {
                 let _ = std::fs::create_dir_all(&local_root);
             }
+            self.ensure_visible_dirs_cached(&local_root, cx);
             let mut rows = Vec::new();
             // Pass the currently-open document path so every render cycle the active
             // file is highlighted regardless of how it was opened.

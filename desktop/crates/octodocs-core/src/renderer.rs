@@ -436,10 +436,16 @@ impl Renderer {
                     } else if in_code_block {
                         code_buf.push_str(&s);
                     } else if in_table_cell {
+                        if let Some(ref url) = in_link {
+                            table_cell_buf.push(Inline::Link { text: s, url: url.clone() });
+                            continue;
+                        }
                         let inline = if bold {
                             Inline::Bold(s)
                         } else if italic {
                             Inline::Italic(s)
+                        } else if underline {
+                            Inline::Underline(s)
                         } else if strikethrough {
                             Inline::Strikethrough(s)
                         } else {
@@ -476,18 +482,24 @@ impl Renderer {
                 }
 
                 Event::Code(text) => {
-                    if in_paragraph {
+                    if in_table_cell {
+                        table_cell_buf.push(Inline::Code(text.into_string()));
+                    } else if in_paragraph {
                         inline_buf.push(Inline::Code(text.into_string()));
                     }
                 }
 
                 Event::SoftBreak => {
-                    if in_paragraph {
+                    if in_table_cell {
+                        table_cell_buf.push(Inline::SoftBreak);
+                    } else if in_paragraph {
                         inline_buf.push(Inline::SoftBreak);
                     }
                 }
                 Event::HardBreak => {
-                    if in_paragraph {
+                    if in_table_cell {
+                        table_cell_buf.push(Inline::HardBreak);
+                    } else if in_paragraph {
                         inline_buf.push(Inline::HardBreak);
                     }
                 }

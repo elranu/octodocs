@@ -13,8 +13,11 @@ use octodocs_core::{
 };
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, RwLock};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Actions
@@ -152,6 +155,12 @@ pub struct DocumentEditorState {
     pub image_zoom: Option<PathBuf>,
     /// Index of the image paragraph the mouse is currently hovering over (for magnifier badge).
     pub hovered_image_para: Option<usize>,
+    /// Index of the mermaid paragraph the mouse is currently hovering over (for magnifier badge).
+    pub hovered_mermaid_para: Option<usize>,
+    /// Per-paragraph total visual pixel height (text only, excl. PARA_GAP).
+    /// Populated each paint pass; used by request_layout/prepaint to size the
+    /// scroll area correctly after word-wrap is computed.
+    pub para_visual_heights: Vec<f32>,
     /// Whether the mouse is hovering a link span (drives pointer cursor).
     pub hovered_link: bool,
     /// Set to Some(path) by a link click on a local .md file; the host app should
@@ -181,11 +190,40 @@ impl DocumentEditorState {
             image_resize_drag: None,
             image_zoom: None,
             hovered_image_para: None,
+            hovered_mermaid_para: None,
+            para_visual_heights: Vec::new(),
             hovered_link: false,
             navigate_request: None,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             pending_images: HashSet::new(),
         }
+    }
+
+    fn reset_transient_state(&mut self) {
+        self.cursor = DocCursor::zero();
+        self.selection = None;
+        self.marked_range = None;
+        self.layout_cache.clear();
+        self.drag_anchor = None;
+        self.image_resize_drag = None;
+        self.image_zoom = None;
+        self.hovered_image_para = None;
+        self.hovered_mermaid_para = None;
+        self.hovered_link = false;
+        self.navigate_request = None;
+        self.para_visual_heights.clear();
+        self.drag_occurred = false;
+        self.table_cursor = None;
+        self.image_cache = Arc::new(RwLock::new(HashMap::new()));
+        self.pending_images.clear();
+        IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
+        MERMAID_CACHE.with(|cache| cache.borrow_mut().clear());
+        MERMAID_DIMS_CACHE.with(|cache| cache.borrow_mut().clear());
+    }
+
+    pub fn clear(&mut self) {
+        self.paragraphs = vec![DocParagraph::empty()];
+        self.reset_transient_state();
     }
 
     /// Replace the document content. Cursor resets to the beginning.
@@ -195,20 +233,7 @@ impl DocumentEditorState {
         } else {
             paragraphs
         };
-        self.cursor = DocCursor::zero();
-        self.selection = None;
-        self.marked_range = None;
-        self.layout_cache.clear();
-        self.drag_anchor = None;
-        self.image_resize_drag = None;
-        self.image_zoom = None;
-        self.hovered_image_para = None;
-        self.drag_occurred = false;
-        self.table_cursor = None;
-        // Fresh cache for the new document; any in-flight tasks from the old
-        // document captured the previous Arc so they write nowhere useful.
-        self.image_cache = Arc::new(RwLock::new(HashMap::new()));
-        self.pending_images.clear();
+        self.reset_transient_state();
         // Spawn background decode for every image paragraph so paint never blocks.
         let doc_dir = self.document_dir.clone();
         for para in &self.paragraphs {
@@ -409,6 +434,21 @@ impl DocumentEditorState {
 
     /// Get selected text as a String (or empty if no selection).
     pub fn selected_text(&self) -> String {
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                let Some(sel) = self.selection else { return String::new(); };
+                let (start, end) = sel.ordered();
+                if start.para_idx == para_idx && end.para_idx == para_idx {
+                    let cell = self.table_cell_text(para_idx, tr, tc);
+                    let s = start.char_offset.min(cell.chars().count());
+                    let e = end.char_offset.min(cell.chars().count());
+                    return cell.chars().skip(s).take(e.saturating_sub(s)).collect();
+                }
+                return String::new();
+            }
+        }
+
         let Some(sel) = self.selection else { return String::new(); };
         let (start, end) = sel.ordered();
         if start.para_idx == end.para_idx {
@@ -434,6 +474,51 @@ impl DocumentEditorState {
 
     /// Insert (or replace selection with) a hyperlink span.
     pub fn insert_link(&mut self, text: String, url: String, cx: &mut Context<Self>) {
+        // Table cells are stored as plain strings (not inline spans), so insert
+        // markdown link syntax directly into the active cell.
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                let insert_text = if text.is_empty() { url.clone() } else { text };
+                let link_md = format!("[{insert_text}]({url})");
+                let cell: &mut String = if tr == 0 {
+                    &mut headers[tc]
+                } else {
+                    &mut rows[tr - 1][tc]
+                };
+                let (start_off, end_off) = if let Some(sel) = self.selection {
+                    let (start, end) = sel.ordered();
+                    if start.para_idx == para_idx && end.para_idx == para_idx {
+                        (start.char_offset, end.char_offset)
+                    } else {
+                        (self.cursor.char_offset, self.cursor.char_offset)
+                    }
+                } else {
+                    (self.cursor.char_offset, self.cursor.char_offset)
+                };
+                let char_count = cell.chars().count();
+                let safe_start = start_off.min(char_count);
+                let safe_end = end_off.min(char_count);
+                if safe_start < safe_end {
+                    let byte_s = cell.char_indices().nth(safe_start).map(|(i, _)| i).unwrap_or(cell.len());
+                    let byte_e = cell.char_indices().nth(safe_end).map(|(i, _)| i).unwrap_or(cell.len());
+                    cell.drain(byte_s..byte_e);
+                }
+                let insert_off = safe_start.min(cell.chars().count());
+                let byte_off = cell
+                    .char_indices()
+                    .nth(insert_off)
+                    .map(|(i, _)| i)
+                    .unwrap_or(cell.len());
+                cell.insert_str(byte_off, &link_md);
+                *source = gfm_rebuild_from_strings(headers, rows);
+                self.cursor.char_offset = insert_off + link_md.chars().count();
+                self.selection = None;
+                cx.notify();
+                return;
+            }
+        }
+
         // Delete any active selection first (including multi-paragraph) so the
         // link reliably replaces whatever is selected.
         if self.selection.is_some() {
@@ -530,6 +615,29 @@ impl DocumentEditorState {
     fn delete_selection(&mut self, cx: &mut Context<Self>) -> DocCursor {
         let Some(sel) = self.selection.take() else { return self.cursor; };
         let (start, end) = sel.ordered();
+
+        if let Some((tr, tc)) = self.table_cursor {
+            let para_idx = self.cursor.para_idx;
+            if start.para_idx == para_idx
+                && end.para_idx == para_idx
+                && matches!(&self.paragraphs[para_idx].kind, ParagraphKind::Table { .. })
+            {
+                if let ParagraphKind::Table { headers, rows, source } = &mut self.paragraphs[para_idx].kind {
+                    let cell: &mut String = if tr == 0 { &mut headers[tc] } else { &mut rows[tr - 1][tc] };
+                    let char_count = cell.chars().count();
+                    let safe_start = start.char_offset.min(char_count);
+                    let safe_end = end.char_offset.min(char_count);
+                    if safe_start < safe_end {
+                        let byte_s = cell.char_indices().nth(safe_start).map(|(i, _)| i).unwrap_or(cell.len());
+                        let byte_e = cell.char_indices().nth(safe_end).map(|(i, _)| i).unwrap_or(cell.len());
+                        cell.drain(byte_s..byte_e);
+                        *source = gfm_rebuild_from_strings(headers, rows);
+                    }
+                    cx.notify();
+                    return DocCursor { para_idx, char_offset: safe_start };
+                }
+            }
+        }
 
         if start.para_idx == end.para_idx {
             let count = end.char_offset - start.char_offset;
@@ -1317,12 +1425,41 @@ impl DocumentEditorState {
         }
     }
 
+    fn table_cursor_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<DocCursor> {
+        let (row, col) = self.table_cell_from_point(point, bounds)?;
+        let left = bounds.left() + px(LEFT_MARGIN);
+        let vl = self.layout_cache.iter().rev().find(|vl|
+            bounds.top() + px(vl.top_px) <= point.y
+        )?;
+        let para_idx = vl.para_idx;
+        let ParagraphKind::Table { headers, .. } = &self.paragraphs[para_idx].kind else {
+            return None;
+        };
+
+        let col_count = headers.len().max(1);
+        let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+        let col_w_f32: f32 = table_w / px(col_count as f32);
+        let cell_x = left + px(col_w_f32 * col as f32);
+        let text_x_start = cell_x + px(TABLE_CELL_PAD_X);
+        let text_x_end = cell_x + px(col_w_f32 - TABLE_CELL_PAD_X);
+        let rel = ((point.x - text_x_start) / (text_x_end - text_x_start).max(px(1.0))).clamp(0.0, 1.0);
+
+        let cell = self.table_cell_text(para_idx, row, col);
+        let len = cell.chars().count();
+        let char_offset = ((len as f32) * rel).round() as usize;
+        Some(DocCursor { para_idx, char_offset: char_offset.min(len) })
+    }
+
     // ── Mouse ─────────────────────────────────────────────────────────────────
 
     /// Map a screen-space click position to the nearest document cursor position.
     /// Uses the per-line `glyph_xs` cache populated each paint pass for accurate
     /// sub-character hit testing without needing live `ShapedLine` objects.
     pub fn cursor_from_point(&self, point: Point<Pixels>, bounds: Bounds<Pixels>) -> DocCursor {
+        if let Some(c) = self.table_cursor_from_point(point, bounds) {
+            return c;
+        }
+
         let relative_x = (point.x - (bounds.left() + px(LEFT_MARGIN))).max(px(0.0));
 
         // Find the last visual line whose top edge is at or above the click y.
@@ -1667,9 +1804,50 @@ impl Render for DocumentEditorState {
 const LEFT_MARGIN: f32 = 48.0;
 const TOP_PADDING: f32 = 24.0;
 const PARA_GAP: f32 = 8.0;
-const MERMAID_HEIGHT: f32 = 180.0;
+const VIEWPORT_OVERSCAN_PX: f32 = 300.0;
+/// Fallback height used before a mermaid diagram has been rendered for the first time.
+const MERMAID_HEIGHT_LOADING: f32 = 120.0;
+/// Maximum display height for a mermaid diagram (prevents extremely tall diagrams).
+const MAX_MERMAID_HEIGHT: f32 = 600.0;
+/// Minimum display height so even tiny diagrams have a visible block.
+const MIN_MERMAID_HEIGHT: f32 = 80.0;
 const IMAGE_BLOCK_DEFAULT_HEIGHT: f32 = 300.0;
 
+// Per-process image decode cache: path string → decoded BGRA RenderImage.
+// Using thread_local avoids any GPUI state entanglement; images are decoded
+// once on the first paint frame and served from memory thereafter.
+thread_local! {
+    static IMAGE_CACHE: RefCell<std::collections::HashMap<String, Arc<RenderImage>>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Mermaid source hash → rendered RenderImage (Ok) or failed flag (Err).
+    static MERMAID_CACHE: RefCell<std::collections::HashMap<u64, Result<Arc<RenderImage>, ()>>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Mermaid source hash → natural (logical) dimensions (width, height) in SVG pixels.
+    static MERMAID_DIMS_CACHE: RefCell<std::collections::HashMap<u64, (f32, f32)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Compute a stable u64 hash for a mermaid source string.
+/// Uses the same seed as preview_pane so both share the same /tmp PNG + .dims files.
+fn mermaid_source_hash(source: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    "mermaid-cache-v6".hash(&mut h);
+    source.hash(&mut h);
+    h.finish()
+}
+
+/// Return the proportional display height for a mermaid block given the container width.
+/// Falls back to MERMAID_HEIGHT_LOADING if dimensions are not yet known.
+fn mermaid_display_height(key: u64, block_w: f32) -> f32 {
+    let dims = MERMAID_DIMS_CACHE.with(|c| c.borrow().get(&key).copied());
+    if let Some((nw, nh)) = dims {
+        if nw > 0.0 {
+            let h = nh * (block_w / nw);
+            return h.clamp(MIN_MERMAID_HEIGHT, MAX_MERMAID_HEIGHT);
+        }
+    }
+    MERMAID_HEIGHT_LOADING
+}
 const TABLE_ROW_H: f32 = 28.0;
 const TABLE_CELL_PAD_X: f32 = 8.0;
 const TABLE_CELL_PAD_Y: f32 = 5.0;
@@ -1692,6 +1870,24 @@ fn gfm_rebuild_from_strings(headers: &[String], rows: &[Vec<String>]) -> String 
         out.push('\n');
     }
     out
+}
+
+/// Parse a simple markdown link that occupies the full cell text: `[label](url)`.
+fn parse_markdown_link_exact(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    if !t.starts_with('[') || !t.ends_with(')') {
+        return None;
+    }
+    let close_bracket = t.find("](")?;
+    if close_bracket < 1 || close_bracket + 2 >= t.len() {
+        return None;
+    }
+    let label = &t[1..close_bracket];
+    let url = &t[(close_bracket + 2)..(t.len() - 1)];
+    if label.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some((label.to_string(), url.to_string()))
 }
 
 /// Total pixel height for a table paragraph (header row + data rows + border).
@@ -1852,6 +2048,7 @@ fn spans_to_text_runs(
     base_color: Hsla,
     emphasis_color: Hsla,
     code_color: Hsla,
+    link_color: Hsla,
     mono_font_family: &SharedString,
 ) -> (String, Vec<TextRun>) {
     let mut line_text = String::new();
@@ -1887,7 +2084,7 @@ fn spans_to_text_runs(
         let color = match span.format {
             InlineFormat::Code => code_color,
             InlineFormat::Bold | InlineFormat::Italic | InlineFormat::Underline | InlineFormat::Strikethrough => emphasis_color,
-            InlineFormat::Link => blue(),
+            InlineFormat::Link => link_color,
             InlineFormat::Plain => base_color,
         };
 
@@ -1899,7 +2096,7 @@ fn spans_to_text_runs(
             }),
             InlineFormat::Link => Some(UnderlineStyle {
                 thickness: px(1.0),
-                color: Some(blue()),
+                color: Some(link_color),
                 wavy: false,
             }),
             _ => None,
@@ -1972,11 +2169,16 @@ impl Element for DocumentEditorElement {
         let state = self.state.read(cx);
         let mut total_h = TOP_PADDING;
 
-        for para in &state.paragraphs {
+        for (para_idx, para) in state.paragraphs.iter().enumerate() {
             let lh = para_line_height(&para.kind);
             match &para.kind {
                 ParagraphKind::Mermaid(_) => {
-                    total_h += MERMAID_HEIGHT + PARA_GAP;
+                    let source = para.plain_text();
+                    let key = mermaid_source_hash(&source);
+                    let approx_w = state.last_bounds
+                        .map(|b| f32::from(b.size.width) - LEFT_MARGIN * 2.0)
+                        .unwrap_or(760.0);
+                    total_h += mermaid_display_height(key, approx_w) + PARA_GAP;
                 }
                 ParagraphKind::Image { height, .. } => {
                     total_h += height + PARA_GAP;
@@ -1985,10 +2187,13 @@ impl Element for DocumentEditorElement {
                     total_h += table_height(headers, rows) + PARA_GAP;
                 }
                 _ => {
-                    // Count visual lines by counting '\n's in plain text
+                    // Count visual lines by counting '\n's in plain text;
+                    // if we have cached wrapped heights from a previous paint
+                    // pass, use those instead for accurate wrapping scroll size.
                     let text = para.plain_text();
                     let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
-                    total_h += lh * line_count as f32 + PARA_GAP;
+                    let cached_h = state.para_visual_heights.get(para_idx).copied();
+                    total_h += cached_h.unwrap_or(lh * line_count as f32) + PARA_GAP;
                 }
             }
         }
@@ -2010,25 +2215,31 @@ impl Element for DocumentEditorElement {
         _window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (total_h, _) = {
-            let state = self.state.read(cx);
-            let mut total_h = TOP_PADDING;            for para in &state.paragraphs {
-                let lh = para_line_height(&para.kind);
-                match &para.kind {
-                    ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
-                    ParagraphKind::Image { height, .. } => total_h += height + PARA_GAP,
-                    ParagraphKind::Table { headers, rows, .. } => {
-                        total_h += table_height(headers, rows) + PARA_GAP;
-                    }
-                    _ => {
-                        let text = para.plain_text();
-                        let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
-                        total_h += lh * line_count as f32 + PARA_GAP;
-                    }
+        let state = self.state.read(cx);
+        let mut total_h = TOP_PADDING;
+        for (para_idx, para) in state.paragraphs.iter().enumerate() {
+            let lh = para_line_height(&para.kind);
+            match &para.kind {
+                ParagraphKind::Mermaid(_) => {
+                    let source = para.plain_text();
+                    let key = mermaid_source_hash(&source);
+                    let approx_w = state.last_bounds
+                        .map(|b| f32::from(b.size.width) - LEFT_MARGIN * 2.0)
+                        .unwrap_or(760.0);
+                    total_h += mermaid_display_height(key, approx_w) + PARA_GAP;
+                }
+                ParagraphKind::Image { height, .. } => total_h += height + PARA_GAP,
+                ParagraphKind::Table { headers, rows, .. } => {
+                    total_h += table_height(headers, rows) + PARA_GAP;
+                }
+                _ => {
+                    let text = para.plain_text();
+                    let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
+                    let cached_h = state.para_visual_heights.get(para_idx).copied();
+                    total_h += cached_h.unwrap_or(lh * line_count as f32) + PARA_GAP;
                 }
             }
-            (total_h, state.hovered_link)
-        };
+        }
 
         let _ = total_h;
         EditorPrepaintState
@@ -2075,18 +2286,49 @@ impl Element for DocumentEditorElement {
         let mono_family: SharedString = theme.tokens.font_mono.clone().into();
         let emphasis_color = theme.tokens.primary;
         let code_color = theme.tokens.primary.opacity(0.85);
+        let link_color = gpui::hsla(200.0 / 360.0, 0.95, 0.72, 1.0);
         let selection_color = theme.tokens.primary.opacity(0.22);
         let caret_color = theme.tokens.primary;
+        let viewport = window.viewport_size();
+        let viewport_top = px(0.0);
+        let viewport_bottom = px(f32::from(viewport.height));
+        let overscan = px(VIEWPORT_OVERSCAN_PX);
 
-        let (paragraphs, cursor, selection, table_cursor) = {
+        let (
+            paragraphs,
+            cursor,
+            selection,
+            table_cursor,
+            cached_para_heights,
+            doc_dir,
+            hovered_image_para,
+            hovered_mermaid_para,
+        ) = {
             let s = self.state.read(cx);
-            (s.paragraphs.clone(), s.cursor, s.selection, s.table_cursor)
+            (
+                s.paragraphs.clone(),
+                s.cursor,
+                s.selection,
+                s.table_cursor,
+                s.para_visual_heights.clone(),
+                s.document_dir.clone(),
+                s.hovered_image_para,
+                s.hovered_mermaid_para,
+            )
         };
 
         let mut current_y: f32 = TOP_PADDING;
         let left: Pixels = bounds.left() + px(LEFT_MARGIN);
+        let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
         let mut visual_lines: Vec<VisualLine> = Vec::new();
         let mut line_layouts: Vec<Option<ShapedLine>> = Vec::new();
+        // Per-paragraph visual heights accumulated this frame.
+        let mut para_visual_heights: Vec<f32> = Vec::new();
+        let is_in_viewport = |top_doc_y: f32, block_h: f32| {
+            let top_screen = bounds.top() + px(top_doc_y);
+            let bottom_screen = top_screen + px(block_h.max(1.0));
+            bottom_screen >= viewport_top - overscan && top_screen <= viewport_bottom + overscan
+        };
 
         for (para_idx, para) in paragraphs.iter().enumerate() {
             let kind = &para.kind;
@@ -2094,6 +2336,15 @@ impl Element for DocumentEditorElement {
             let line_height = para_line_height(kind);
             let font_size = px(font_size_px);
             let lh_px = px(line_height);
+            let fallback_para_h = cached_para_heights
+                .get(para_idx)
+                .copied()
+                .unwrap_or_else(|| {
+                    let text = para.plain_text();
+                    let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
+                    line_height * line_count as f32
+                })
+                .max(line_height);
 
             let para_color = match kind {
                 ParagraphKind::Heading(_) => theme.tokens.foreground,
@@ -2103,51 +2354,208 @@ impl Element for DocumentEditorElement {
 
             match kind {
                 ParagraphKind::Mermaid(_) => {
-                    // Paint a placeholder rectangle for mermaid blocks
+                    if !is_in_viewport(current_y, fallback_para_h) {
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: para.char_count(),
+                            top_px: current_y,
+                            height_px: fallback_para_h,
+                            font_size_px,
+                            is_mermaid: true,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(fallback_para_h);
+                        current_y += fallback_para_h + PARA_GAP;
+                        continue;
+                    }
+
+                    // The actual mermaid source is stored in para.spans, not in the PathBuf field.
+                    let mermaid_source = para.plain_text();
                     let top_screen = bounds.top() + px(current_y);
-                    let mermaid_bounds = Bounds::new(
-                        point(left, top_screen),
-                        size(bounds.size.width - px(LEFT_MARGIN * 2.0), px(MERMAID_HEIGHT)),
-                    );
-                    window.paint_quad(fill(mermaid_bounds, theme.tokens.muted.opacity(0.3)));
-                    // Label
-                    let label_run = TextRun {
-                        len: "Mermaid diagram".len(),
-                        font: base_font.clone(),
-                        color: theme.tokens.muted_foreground,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    let shaped = window.text_system().shape_line(
-                        "Mermaid diagram".into(),
-                        px(13.0),
-                        &[label_run],
-                        None,
-                    );
-                    let _ = shaped.paint(
-                        point(left, top_screen + px(MERMAID_HEIGHT / 2.0 - 8.0)),
-                        px(20.0),
-                        window,
-                        cx,
-                    );
-                    visual_lines.push(VisualLine {
-                        para_idx,
-                        char_start: 0,
-                        char_end: 0,
-                        top_px: current_y,
-                        height_px: MERMAID_HEIGHT,
-                        font_size_px,
-                        is_mermaid: true,
-                        glyph_xs: vec![],
+                    let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
+                    let key = mermaid_source_hash(&mermaid_source);
+
+                    // Render to PNG once, cache the decoded RenderImage.
+                    let render_image: Option<Arc<RenderImage>> = MERMAID_CACHE.with(|cache| {
+                        let mut map = cache.borrow_mut();
+                        if let Some(entry) = map.get(&key) {
+                            return entry.as_ref().ok().cloned();
+                        }
+                        // Generate PNG to temp cache dir.
+                        let cache_dir = std::env::temp_dir().join("octodocs-mermaid-cache");
+                        let _ = std::fs::create_dir_all(&cache_dir);
+                        let png_path = cache_dir.join(format!("{key}.png"));
+                        let dims_path = cache_dir.join(format!("{key}.dims"));
+                        // Load or render the PNG, and always populate the dims cache.
+                        let result = if png_path.exists() {
+                            // Read dims sidecar if present.
+                            if let Ok(raw) = std::fs::read_to_string(&dims_path) {
+                                let mut parts = raw.split_whitespace();
+                                if let (Some(w), Some(h)) = (parts.next(), parts.next()) {
+                                    if let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>()) {
+                                        MERMAID_DIMS_CACHE.with(|c| c.borrow_mut().insert(key, (w, h)));
+                                    }
+                                }
+                            }
+                            std::fs::read(&png_path).ok()
+                        } else {
+                            match octodocs_core::mermaid::render_png(&mermaid_source, &png_path) {
+                                Ok((nw, nh)) => {
+                                    MERMAID_DIMS_CACHE.with(|c| c.borrow_mut().insert(key, (nw, nh)));
+                                    let _ = std::fs::write(&dims_path, format!("{nw} {nh}"));
+                                    std::fs::read(&png_path).ok()
+                                }
+                                Err(_) => None,
+                            }
+                        };
+                        let ri = result
+                            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                            .map(|dyn_img| {
+                                let mut rgba = dyn_img.into_rgba8();
+                                // GPUI requires BGRA: swap R and B channels.
+                                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                                Arc::new(RenderImage::new([image::Frame::new(rgba)]))
+                            });
+                        let out = ri.clone();
+                        map.insert(key, ri.ok_or(()));
+                        out
                     });
-                    line_layouts.push(None);
-                    current_y += MERMAID_HEIGHT + PARA_GAP;
+
+                    if let Some(ri) = render_image {
+                        let img_size = ri.size(0);
+                        let iw = img_size.width.0 as f32;
+                        let ih = img_size.height.0 as f32;
+                        // Compute proportional display height from natural dims.
+                        // Use the RenderImage pixel aspect ratio as fallback if dims cache isn't populated yet.
+                        let display_h = mermaid_display_height(key, f32::from(block_w));
+                        if iw > 0.0 && ih > 0.0 {
+                            // Fit the image into the block proportionally (no letterbox padding).
+                            let display_w = f32::from(block_w);
+                            let scale = (display_w / iw).min(display_h / ih);
+                            let dw = iw * scale;
+                            let dh = ih * scale;
+                            let ox = (display_w - dw) / 2.0;
+                            let oy = (display_h - dh) / 2.0;
+                            let paint_bounds = Bounds::new(
+                                point(left + px(ox), top_screen + px(oy)),
+                                size(px(dw), px(dh)),
+                            );
+                            let _ = window.paint_image(paint_bounds, gpui::Corners::default(), ri, 0, false);
+                        }
+                        // Magnifier badge in top-right corner when hovered.
+                        let is_hovered = hovered_mermaid_para == Some(para_idx);
+                        if is_hovered {
+                            let badge_size = 32.0_f32;
+                            let badge_x = left + block_w - px(badge_size + 8.0);
+                            let badge_y = top_screen + px(8.0);
+                            let badge_bounds = Bounds::new(
+                                point(badge_x, badge_y),
+                                size(px(badge_size), px(badge_size)),
+                            );
+                            window.paint_quad(gpui::PaintQuad {
+                                bounds: badge_bounds,
+                                corner_radii: gpui::Corners::all(px(badge_size / 2.0)),
+                                background: gpui::rgba(0x000000cc).into(),
+                                border_widths: gpui::Edges::all(px(0.0)),
+                                border_color: gpui::transparent_black(),
+                                border_style: gpui::BorderStyle::Solid,
+                                continuous_corners: false,
+                            });
+                            let icon = "\u{1f50d}"; // 🔍
+                            let icon_run = TextRun {
+                                len: icon.len(),
+                                font: base_font.clone(),
+                                color: gpui::white(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            let shaped = window.text_system().shape_line(
+                                icon.into(), px(16.0), &[icon_run], None,
+                            );
+                            let _ = shaped.paint(
+                                point(badge_x + px(8.0), badge_y + px(8.0)),
+                                px(24.0), window, cx,
+                            );
+                        }
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: 0,
+                            top_px: current_y,
+                            height_px: display_h,
+                            font_size_px,
+                            is_mermaid: true,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(display_h);
+                        current_y += display_h + PARA_GAP;
+                    } else {
+                        // Fallback placeholder when rendering failed.
+                        let display_h = MERMAID_HEIGHT_LOADING;
+                        let mermaid_bounds = Bounds::new(
+                            point(left, top_screen),
+                            size(block_w, px(display_h)),
+                        );
+                        window.paint_quad(fill(mermaid_bounds, theme.tokens.muted.opacity(0.3)));
+                        let label_run = TextRun {
+                            len: "Mermaid diagram".len(),
+                            font: base_font.clone(),
+                            color: theme.tokens.muted_foreground,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shaped = window.text_system().shape_line(
+                            "Mermaid diagram".into(),
+                            px(13.0),
+                            &[label_run],
+                            None,
+                        );
+                        let _ = shaped.paint(
+                            point(left, top_screen + px(display_h / 2.0 - 8.0)),
+                            px(20.0),
+                            window,
+                            cx,
+                        );
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: 0,
+                            top_px: current_y,
+                            height_px: display_h,
+                            font_size_px,
+                            is_mermaid: true,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(display_h);
+                        current_y += display_h + PARA_GAP;
+                    }
                     continue;
                 }
                 ParagraphKind::Image { path, height, .. } => {
                     let img_height = *height;
-                    let doc_dir = self.state.read(cx).document_dir.clone();
+                    if !is_in_viewport(current_y, img_height) {
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: para.char_count(),
+                            top_px: current_y,
+                            height_px: img_height,
+                            font_size_px,
+                            is_mermaid: false,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(img_height);
+                        current_y += img_height + PARA_GAP;
+                        continue;
+                    }
+
                     let abs_path = doc_dir
                         .as_ref()
                         .map(|d| d.join(path.as_str()))
@@ -2212,7 +2620,7 @@ impl Element for DocumentEditorElement {
                     ));
 
                     // Magnifier badge in top-right corner when hovered.
-                    let is_hovered = self.state.read(cx).hovered_image_para == Some(para_idx);
+                    let is_hovered = hovered_image_para == Some(para_idx);
                     if is_hovered {
                         let badge_size = 32.0_f32;
                         let badge_x = left + block_w - px(badge_size + 8.0);
@@ -2259,11 +2667,28 @@ impl Element for DocumentEditorElement {
                         glyph_xs: vec![],
                     });
                     line_layouts.push(None);
+                    para_visual_heights.push(img_height);
                     current_y += img_height + PARA_GAP;
                     continue;
                 }
                 ParagraphKind::Table { headers, rows, .. } => {
                     let th = table_height(headers, rows);
+                    if !is_in_viewport(current_y, th) {
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: para.char_count(),
+                            top_px: current_y,
+                            height_px: th,
+                            font_size_px,
+                            is_mermaid: false,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(th);
+                        current_y += th + PARA_GAP;
+                        continue;
+                    }
                     let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
                     let col_count = headers.len().max(1);
                     // col_w_f32: raw f32 for arithmetic (Pixels/Pixels = f32)
@@ -2306,22 +2731,37 @@ impl Element for DocumentEditorElement {
                     let cell_font_size = px(13.0);
                     let cell_lh = px(TABLE_ROW_H);
 
-                    let mut paint_cells = |cells: &[String], row_top: Pixels, bold: bool, window: &mut Window| {
+                    let mut paint_cells = |cells: &[String], row_top: Pixels, bold: bool, row_index: usize, window: &mut Window| {
                         let mut header_font = base_font.clone();
                         if bold { header_font.weight = gpui::FontWeight::BOLD; }
                         for (ci, cell_text) in cells.iter().enumerate() {
                             let cell_x = left + px(col_w_f32 * ci as f32 + TABLE_CELL_PAD_X);
                             let cell_y = row_top + px(TABLE_CELL_PAD_Y);
+                            let cell_content_w = (col_w_f32 - TABLE_CELL_PAD_X * 2.0).max(4.0);
+                            let (render_text, render_is_link) = if let Some((label, _url)) = parse_markdown_link_exact(cell_text) {
+                                (label, true)
+                            } else {
+                                (cell_text.clone(), false)
+                            };
                             // Clip text to column width
-                            let max_chars = ((col_w_f32 - TABLE_CELL_PAD_X * 2.0) / 7.5).max(4.0) as usize;
-                            let display: String = cell_text.chars().take(max_chars.max(4)).collect();
+                            let max_chars = (cell_content_w / 7.5).max(4.0) as usize;
+                            let display: String = render_text.chars().take(max_chars.max(4)).collect();
                             if display.is_empty() { continue; }
+                            let underline = if render_is_link {
+                                Some(UnderlineStyle {
+                                    thickness: px(1.0),
+                                    color: Some(link_color),
+                                    wavy: false,
+                                })
+                            } else {
+                                None
+                            };
                             let run = TextRun {
                                 len: display.len(),
                                 font: header_font.clone(),
-                                color: if bold { theme.tokens.foreground } else { theme.tokens.foreground },
+                                color: if render_is_link { link_color } else { theme.tokens.foreground },
                                 background_color: None,
-                                underline: None,
+                                underline,
                                 strikethrough: None,
                             };
                             let shaped = window.text_system().shape_line(
@@ -2330,12 +2770,37 @@ impl Element for DocumentEditorElement {
                                 &[run],
                                 None,
                             );
+
+                            if let Some(sel) = selection {
+                                if let Some((tc_tr, tc_tc)) = table_cursor {
+                                    if cursor.para_idx == para_idx && tc_tr == row_index && tc_tc == ci {
+                                        let (sel_start, sel_end) = sel.ordered();
+                                        let raw_len = cell_text.chars().count();
+                                        let s = sel_start.char_offset.min(raw_len);
+                                        let e = sel_end.char_offset.min(raw_len);
+                                        if e > s {
+                                            let raw_prefix_s: String = cell_text.chars().take(s).collect();
+                                            let raw_prefix_e: String = cell_text.chars().take(e).collect();
+                                            let x1 = shaped.x_for_index(raw_prefix_s.len());
+                                            let x2 = shaped.x_for_index(raw_prefix_e.len());
+                                            let width = (x2 - x1).max(px(1.0));
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(cell_x + x1, row_top + px(2.0)),
+                                                    size(width, px(TABLE_ROW_H - 4.0)),
+                                                ),
+                                                selection_color,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                             let _ = shaped.paint(point(cell_x, cell_y), cell_lh, window, cx);
                         }
                     };
 
                     // Header row (bold)
-                    paint_cells(headers, top_screen, true, window);
+                    paint_cells(headers, top_screen, true, 0, window);
                     // Data rows
                     for (ri, row) in rows.iter().enumerate() {
                         let row_top = top_screen + px(TABLE_ROW_H * (ri + 1) as f32);
@@ -2347,7 +2812,7 @@ impl Element for DocumentEditorElement {
                             );
                             window.paint_quad(fill(row_bg, theme.tokens.muted.opacity(0.15)));
                         }
-                        paint_cells(row, row_top, false, window);
+                        paint_cells(row, row_top, false, ri + 1, window);
                     }
 
                     // ── Active cell highlight + text cursor ─────────────────
@@ -2424,10 +2889,28 @@ impl Element for DocumentEditorElement {
                         glyph_xs: vec![],
                     });
                     line_layouts.push(None);
+                    para_visual_heights.push(th);
                     current_y += th + PARA_GAP;
                     continue;
                 }
                 _ => {}
+            }
+
+            if !is_in_viewport(current_y, fallback_para_h) {
+                visual_lines.push(VisualLine {
+                    para_idx,
+                    char_start: 0,
+                    char_end: para.char_count(),
+                    top_px: current_y,
+                    height_px: fallback_para_h,
+                    font_size_px,
+                    is_mermaid: false,
+                    glyph_xs: vec![px(0.0)],
+                });
+                line_layouts.push(None);
+                para_visual_heights.push(fallback_para_h);
+                current_y += fallback_para_h + PARA_GAP;
+                continue;
             }
 
             // For code fences, draw a background rect first
@@ -2497,26 +2980,33 @@ impl Element for DocumentEditorElement {
                 }
             }
 
-            // Split paragraph text at '\n' to get visual sub-lines
+            // Split paragraph text at '\n' to get visual sub-lines, then
+            // word-wrap each sub-line to fit within block_w.
             let flat = para.plain_text();
             let sublines: Vec<&str> = flat.split('\n').collect();
             let mut char_start = 0usize;
-
+            let mut para_h = 0.0f32;
 
             for subline in &sublines {
                 let char_count = subline.chars().count();
                 let char_end = char_start + char_count;
                 let line_y_screen = bounds.top() + px(current_y);
 
-                // Shape the line and compute per-character x-positions for
-                // accurate mouse hit-testing (stored in VisualLine::glyph_xs).
-                let glyph_xs: Vec<Pixels>;
-                let shaped_line: Option<ShapedLine>;
-
                 if subline.is_empty() {
                     // Empty line — cursor sits at x=0 relative to margin.
-                    glyph_xs = vec![px(0.0)];
-                    shaped_line = None;
+                    visual_lines.push(VisualLine {
+                        para_idx,
+                        char_start,
+                        char_end,
+                        top_px: current_y,
+                        height_px: line_height,
+                        font_size_px,
+                        is_mermaid: false,
+                        glyph_xs: vec![px(0.0)],
+                    });
+                    line_layouts.push(None);
+                    current_y += line_height;
+                    para_h += line_height;
                 } else {
                     let (line_text, runs) = spans_to_text_runs(
                         &para.spans,
@@ -2526,58 +3016,149 @@ impl Element for DocumentEditorElement {
                         para_color,
                         emphasis_color,
                         code_color,
+                        link_color,
                         &mono_family,
                     );
                     let total_run_bytes: usize = runs.iter().map(|r| r.len).sum();
+
                     if !line_text.is_empty() && total_run_bytes > 0 {
-                        let shaped = window.text_system().shape_line(
+                        // Use shape_text with word-wrap so long lines break visually.
+                        let wrap_result = window.text_system().shape_text(
                             line_text.clone().into(),
                             font_size,
                             &runs,
+                            Some(block_w),
                             None,
                         );
-                        // glyph_xs[i] = left-edge x of char i (relative to left margin).
-                        // glyph_xs[char_count] = right-edge of last char (cursor-after-end).
-                        let char_count = char_end - char_start;
-                        glyph_xs = (0..=char_count)
-                            .map(|ci| shaped.x_for_index(chars_to_bytes(subline, ci)))
-                            .collect();
-                        let _ = shaped.paint(point(left, line_y_screen), lh_px, window, cx);
-                        shaped_line = Some(shaped);
+
+                        let wrapped = wrap_result.ok().and_then(|mut v| v.drain(..).next());
+
+                        if let Some(wl) = wrapped {
+                            // Paint the full wrapped block in one call.
+                            let _ = wl.paint(
+                                point(left, line_y_screen),
+                                lh_px,
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+
+                            // Split into per-visual-row VisualLine entries using wrap
+                            // boundaries from the layout so cursor and selection work.
+                            let unwrapped = &wl.unwrapped_layout;
+
+                            // Collect byte offsets where each row ends.
+                            let mut row_end_bytes: Vec<usize> = wl
+                                .wrap_boundaries
+                                .iter()
+                                .map(|wb| {
+                                    unwrapped
+                                        .runs
+                                        .get(wb.run_ix)
+                                        .and_then(|r| r.glyphs.get(wb.glyph_ix))
+                                        .map(|g| g.index)
+                                        .unwrap_or(line_text.len())
+                                })
+                                .collect();
+                            row_end_bytes.push(line_text.len());
+
+                            let num_rows = row_end_bytes.len();
+                            let mut row_start_byte = 0usize;
+                            let mut row_char_start = char_start;
+
+                            for (row_idx, &row_end_byte) in row_end_bytes.iter().enumerate() {
+                                let row_text = &line_text[row_start_byte..row_end_byte];
+                                let row_char_count = row_text.chars().count();
+                                let row_char_end = row_char_start + row_char_count;
+
+                                // x base in the unwrapped layout for this visual row.
+                                let row_base_x = if row_start_byte == 0 {
+                                    px(0.0)
+                                } else {
+                                    unwrapped.x_for_index(row_start_byte)
+                                };
+
+                                // glyph_xs: char-indexed positions relative to row start.
+                                let gc = row_char_end - row_char_start;
+                                let row_glyph_xs: Vec<Pixels> = (0..=gc)
+                                    .map(|ci| {
+                                        let byte =
+                                            row_start_byte + chars_to_bytes(row_text, ci);
+                                        unwrapped.x_for_index(byte) - row_base_x
+                                    })
+                                    .collect();
+
+                                visual_lines.push(VisualLine {
+                                    para_idx,
+                                    char_start: row_char_start,
+                                    char_end: row_char_end,
+                                    top_px: current_y + row_idx as f32 * line_height,
+                                    height_px: line_height,
+                                    font_size_px,
+                                    is_mermaid: false,
+                                    glyph_xs: row_glyph_xs,
+                                });
+                                line_layouts.push(None);
+
+                                row_start_byte = row_end_byte;
+                                row_char_start = row_char_end;
+                            }
+
+                            let total_h = num_rows as f32 * line_height;
+                            current_y += total_h;
+                            para_h += total_h;
+                        } else {
+                            // shape_text failed — fallback: render as single unshaped line.
+                            visual_lines.push(VisualLine {
+                                para_idx,
+                                char_start,
+                                char_end,
+                                top_px: current_y,
+                                height_px: line_height,
+                                font_size_px,
+                                is_mermaid: false,
+                                glyph_xs: vec![px(0.0)],
+                            });
+                            line_layouts.push(None);
+                            current_y += line_height;
+                            para_h += line_height;
+                        }
                     } else {
-                        glyph_xs = vec![px(0.0)];
-                        shaped_line = None;
+                        // Zero-length or zero-run line.
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start,
+                            char_end,
+                            top_px: current_y,
+                            height_px: line_height,
+                            font_size_px,
+                            is_mermaid: false,
+                            glyph_xs: vec![px(0.0)],
+                        });
+                        line_layouts.push(None);
+                        current_y += line_height;
+                        para_h += line_height;
                     }
                 }
 
-                visual_lines.push(VisualLine {
-                    para_idx,
-                    char_start,
-                    char_end,
-                    top_px: current_y,
-                    height_px: line_height,
-                    font_size_px,
-                    is_mermaid: false,
-                    glyph_xs,
-                });
-                line_layouts.push(shaped_line);
-
                 char_start = char_end + 1;
-                current_y += line_height;
             }
 
+            para_visual_heights.push(para_h);
             current_y += PARA_GAP;
         }
 
-        // Store layout cache in state for cursor/mouse use
+        // Store layout cache and per-paragraph visual heights in state.
         self.state.update(cx, |s, _| {
             s.layout_cache = visual_lines.clone();
+            s.para_visual_heights = para_visual_heights;
         });
 
         // ── Selection highlight ──────────────────────────────────────────────
         if let Some(sel) = selection {
             let (sel_start, sel_end) = sel.ordered();
-            for (vl_idx, vl) in visual_lines.iter().enumerate() {
+            for (_, vl) in visual_lines.iter().enumerate() {
                 if vl.is_mermaid { continue; }
                 let vl_para = vl.para_idx;
                 let vl_cs = vl.char_start;
@@ -2602,18 +3183,12 @@ impl Element for DocumentEditorElement {
                 };
 
                 let line_y_screen = bounds.top() + px(vl.top_px);
-                let (sel_x_start, sel_width) = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
+                let (sel_x_start, sel_width) = {
                     let col_s = sel_s_in_vl - vl_cs;
                     let col_e = sel_e_in_vl - vl_cs;
-                    let vl_text: String = paragraphs[vl_para].plain_text()
-                        .chars().skip(vl_cs).take(vl_ce - vl_cs).collect();
-                    let byte_s = chars_to_bytes(&vl_text, col_s);
-                    let byte_e = chars_to_bytes(&vl_text, col_e);
-                    let x_s = shaped.x_for_index(byte_s);
-                    let x_e = shaped.x_for_index(byte_e);
+                    let x_s = vl.glyph_xs.get(col_s).copied().unwrap_or(px(0.0));
+                    let x_e = vl.glyph_xs.get(col_e).copied().unwrap_or(x_s);
                     (left + x_s, x_e - x_s)
-                } else {
-                    (left, px(0.0))
                 };
 
                 if sel_width > px(0.0) {
@@ -2636,17 +3211,14 @@ impl Element for DocumentEditorElement {
                     && cursor.char_offset <= vl.char_end
             });
 
-            if let Some((vl_idx, vl)) = cur_vl {
+            if let Some((_, vl)) = cur_vl {
                 // Tables draw their own cell caret in the table paint block above.
                 if !matches!(&paragraphs[vl.para_idx].kind, ParagraphKind::Table { .. }) {
                 let col = cursor.char_offset - vl.char_start;
-                let cursor_x = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
-                    let vl_text: String = paragraphs[vl.para_idx].plain_text()
-                        .chars().skip(vl.char_start).take(vl.char_end - vl.char_start).collect();
-                    let byte_col = chars_to_bytes(&vl_text, col);
-                    left + shaped.x_for_index(byte_col)
-                } else {
-                    left
+                let cursor_x = {
+                    vl.glyph_xs.get(col).copied()
+                        .map(|x| left + x)
+                        .unwrap_or(left)
                 };
                 let cursor_y_screen = bounds.top() + px(vl.top_px);
 
@@ -2774,7 +3346,7 @@ impl RenderOnce for DocumentEditor {
                     return;
                 }
 
-                // Detect single click on the magnifier badge (top-right corner of image).
+                // Detect single click on the magnifier badge (top-right corner of image or mermaid).
                 {
                     let s = state.read(cx);
                     let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
@@ -2782,15 +3354,16 @@ impl RenderOnce for DocumentEditor {
                     let badge_size = 32.0_f32;
                     for vl in &s.layout_cache {
                         let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
-                        if let ParagraphKind::Image { path, .. } = &para.kind {
-                            let top_screen = bounds.top() + px(vl.top_px);
-                            let badge_x = left + block_w - px(badge_size + 8.0);
-                            let badge_y = top_screen + px(8.0);
-                            let in_badge = event.position.x >= badge_x
-                                && event.position.x <= badge_x + px(badge_size)
-                                && event.position.y >= badge_y
-                                && event.position.y <= badge_y + px(badge_size);
-                            if in_badge {
+                        let top_screen = bounds.top() + px(vl.top_px);
+                        let badge_x = left + block_w - px(badge_size + 8.0);
+                        let badge_y = top_screen + px(8.0);
+                        let in_badge = event.position.x >= badge_x
+                            && event.position.x <= badge_x + px(badge_size)
+                            && event.position.y >= badge_y
+                            && event.position.y <= badge_y + px(badge_size);
+                        if !in_badge { continue; }
+                        match &para.kind {
+                            ParagraphKind::Image { path, .. } => {
                                 if let Some(ref dir) = s.document_dir {
                                     let img_path = dir.join(path.as_str());
                                     let _ = s;
@@ -2801,29 +3374,60 @@ impl RenderOnce for DocumentEditor {
                                     window.focus(&focus);
                                     return;
                                 }
-                                break;
                             }
+                            ParagraphKind::Mermaid(_) => {
+                                let source = para.plain_text();
+                                let key = mermaid_source_hash(&source);
+                                let png_path = std::env::temp_dir()
+                                    .join("octodocs-mermaid-cache")
+                                    .join(format!("{key}.png"));
+                                if png_path.exists() {
+                                    let _ = s;
+                                    state.update(cx, |st, cx| {
+                                        st.image_zoom = Some(png_path);
+                                        cx.notify();
+                                    });
+                                    window.focus(&focus);
+                                    return;
+                                }
+                            }
+                            _ => {}
                         }
+                        break;
                     }
                 }
 
-                // Detect double-click on an image block → show full-size zoom overlay.
+                // Detect double-click on an image or mermaid block → show full-size zoom overlay.
                 if event.click_count >= 2 {
                     let zoom_path: Option<PathBuf> = {
                         let s = state.read(cx);
                         let mut found = None;
                         for vl in &s.layout_cache {
                             let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
-                            if let ParagraphKind::Image { path, .. } = &para.kind {
-                                let block_top = bounds.top() + px(vl.top_px);
-                                let block_bottom = block_top + px(vl.height_px);
-                                if event.position.y >= block_top && event.position.y <= block_bottom {
+                            let block_top = bounds.top() + px(vl.top_px);
+                            let block_bottom = block_top + px(vl.height_px);
+                            if event.position.y < block_top || event.position.y > block_bottom {
+                                continue;
+                            }
+                            match &para.kind {
+                                ParagraphKind::Image { path, .. } => {
                                     if let Some(ref dir) = s.document_dir {
                                         found = Some(dir.join(path));
                                     }
-                                    break;
                                 }
+                                ParagraphKind::Mermaid(_) => {
+                                    let source = para.plain_text();
+                                    let key = mermaid_source_hash(&source);
+                                    let png_path = std::env::temp_dir()
+                                        .join("octodocs-mermaid-cache")
+                                        .join(format!("{key}.png"));
+                                    if png_path.exists() {
+                                        found = Some(png_path);
+                                    }
+                                }
+                                _ => {}
                             }
+                            break;
                         }
                         found
                     };
@@ -2840,11 +3444,6 @@ impl RenderOnce for DocumentEditor {
                 state.update(cx, |s, cx| {
                     s.cursor = new_cursor;
                     s.table_cursor = new_table_cell;
-                    // When clicking into a table cell, position char_offset at end of cell text
-                    if let Some((tr, tc)) = new_table_cell {
-                        let cell_len = s.table_cell_text(s.cursor.para_idx, tr, tc).chars().count();
-                        s.cursor.char_offset = cell_len;
-                    }
                     // Do not clear selection here. A plain click will clear it on mouse up;
                     // a drag will set drag_occurred=true and keep the selection.
                     s.drag_anchor = Some(new_cursor);
@@ -2896,31 +3495,35 @@ impl RenderOnce for DocumentEditor {
                     }
                 }
 
-                // Track which image block (if any) the cursor is hovering over.
+                // Track which image/mermaid block (if any) the cursor is hovering over.
                 {
-                    let new_hovered = {
+                    let (new_image_hovered, new_mermaid_hovered) = {
                         let s = state_move.read(cx);
                         let b = s.last_bounds.unwrap_or_default();
-                        let mut found = None;
+                        let mut img_found = None;
+                        let mut mer_found = None;
                         for vl in &s.layout_cache {
-                            if s.paragraphs.get(vl.para_idx)
-                                .map(|p| matches!(p.kind, ParagraphKind::Image { .. }))
-                                .unwrap_or(false)
-                            {
-                                let top = b.top() + px(vl.top_px);
-                                let bot = top + px(vl.height_px);
-                                if event.position.y >= top && event.position.y <= bot {
-                                    found = Some(vl.para_idx);
-                                    break;
+                            let top = b.top() + px(vl.top_px);
+                            let bot = top + px(vl.height_px);
+                            if event.position.y < top || event.position.y > bot { continue; }
+                            if let Some(para) = s.paragraphs.get(vl.para_idx) {
+                                match &para.kind {
+                                    ParagraphKind::Image { .. } => { img_found = Some(vl.para_idx); break; }
+                                    ParagraphKind::Mermaid(_) => { mer_found = Some(vl.para_idx); break; }
+                                    _ => {}
                                 }
                             }
                         }
-                        found
+                        (img_found, mer_found)
                     };
-                    let prev = state_move.read(cx).hovered_image_para;
-                    if prev != new_hovered {
+                    let (prev_img, prev_mer) = {
+                        let s = state_move.read(cx);
+                        (s.hovered_image_para, s.hovered_mermaid_para)
+                    };
+                    if prev_img != new_image_hovered || prev_mer != new_mermaid_hovered {
                         state_move.update(cx, |s, cx| {
-                            s.hovered_image_para = new_hovered;
+                            s.hovered_image_para = new_image_hovered;
+                            s.hovered_mermaid_para = new_mermaid_hovered;
                             cx.notify();
                         });
                         // Only short-circuit when not dragging text; during a drag,
@@ -2938,9 +3541,13 @@ impl RenderOnce for DocumentEditor {
                 };
                 if let Some(anchor) = drag_anchor {
                     let focus_cursor = state_move.read(cx).cursor_from_point(event.position, bounds);
+                    let focus_table_cell = state_move.read(cx).table_cell_from_point(event.position, bounds);
                     state_move.update(cx, |s, cx| {
                         s.drag_occurred = true;
                         s.cursor = focus_cursor;
+                        if focus_table_cell.is_some() {
+                            s.table_cursor = focus_table_cell;
+                        }
                         s.selection = if anchor == focus_cursor {
                             None
                         } else {
@@ -2960,6 +3567,22 @@ impl RenderOnce for DocumentEditor {
                     }
                     // Plain click (no drag): open link if the cursor landed on a Link span.
                     if !s.drag_occurred {
+                        if let Some((tr, tc)) = s.table_cursor {
+                            let para_idx = s.cursor.para_idx;
+                            if matches!(&s.paragraphs[para_idx].kind, ParagraphKind::Table { .. }) {
+                                let cell = s.table_cell_text(para_idx, tr, tc);
+                                if let Some((_label, url)) = parse_markdown_link_exact(&cell) {
+                                    if url.starts_with("http://") || url.starts_with("https://") {
+                                        open_url(&url);
+                                    } else if let Some(dir) = s.document_dir.as_ref() {
+                                        let resolved = dir.join(&url).to_string_lossy().into_owned();
+                                        s.navigate_request = Some(resolved);
+                                    } else if std::path::Path::new(&url).is_absolute() {
+                                        s.navigate_request = Some(url);
+                                    }
+                                }
+                            }
+                        }
                         if let Some(url) = s.link_url_at_offset(s.cursor.para_idx, s.cursor.char_offset) {
                             if url.starts_with("http://") || url.starts_with("https://") {
                                 open_url(&url);
