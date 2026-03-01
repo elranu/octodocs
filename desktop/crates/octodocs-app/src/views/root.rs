@@ -4,7 +4,7 @@ use std::rc::Rc;
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::prelude::*;
 use gpui::Subscription;
-use octodocs_core::{FileIo, ParagraphKind};
+use octodocs_core::ParagraphKind;
 use octodocs_github::{get_stored_token, SyncStatus};
 
 use super::document_editor_pane::DocumentEditorPane;
@@ -24,6 +24,8 @@ pub struct RootView {
     github_auth_modal: Entity<GithubAuthModal>,
     repo_add_modal: Entity<RepoAddModal>,
     toolbar: Entity<Toolbar>,
+    repo_modal_token_loading: bool,
+    repo_modal_token_resolved_for_open: bool,
     _pane_subscription: Subscription,
     _root_subscription: Subscription,
 }
@@ -63,10 +65,44 @@ impl RootView {
         // Re-render root and overlays when AppState changes.
         let auth_modal_clone = github_auth_modal.clone();
         let repo_modal_clone = repo_add_modal.clone();
+        let repo_modal_token_target = repo_add_modal.downgrade();
+        let root_weak = cx.entity().downgrade();
         let root_subscription = cx.observe(&app_state, move |_this, _, cx| {
             cx.notify();
             auth_modal_clone.update(cx, |_, cx| cx.notify());
             repo_modal_clone.update(cx, |_, cx| cx.notify());
+
+            let repo_modal_open = _this.app_state.read(cx).repo_add_modal_open;
+            if !repo_modal_open {
+                _this.repo_modal_token_loading = false;
+                _this.repo_modal_token_resolved_for_open = false;
+                return;
+            }
+
+            if !_this.repo_modal_token_loading && !_this.repo_modal_token_resolved_for_open {
+                _this.repo_modal_token_loading = true;
+                let modal_weak = repo_modal_token_target.clone();
+                let root_weak = root_weak.clone();
+                cx.spawn(async move |_, cx| {
+                    let token = cx
+                        .background_executor()
+                        .spawn(async move { get_stored_token().ok().flatten() })
+                        .await;
+
+                    if let Some(token) = token {
+                        let _ = modal_weak.update(cx, |modal, cx| {
+                            modal.set_auth_token(token, cx);
+                        });
+                    }
+
+                    let _ = root_weak.update(cx, |root, cx| {
+                        root.repo_modal_token_loading = false;
+                        root.repo_modal_token_resolved_for_open = true;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
         });
 
         // toolbar actions operate on the single doc_editor entity.
@@ -83,12 +119,8 @@ impl RootView {
                 .add_filter("Markdown", &["md", "markdown"])
                 .pick_file()
             {
-                match FileIo::open(&path) {
-                    Ok(doc) => {
-                        let _ = aw.update(cx, |state, cx| state.load_document(doc, cx));
-                    }
-                    Err(e) => eprintln!("Open error: {e}"),
-                }
+                // All disk I/O and markdown parsing happens on a background thread.
+                let _ = aw.update(cx, |state, cx| state.pull_and_open_file(path, cx));
             }
         };
 
@@ -357,26 +389,36 @@ impl RootView {
 
         let should_force_onboarding = app_state.read(cx).github_bindings.is_empty();
         if should_force_onboarding {
-            match get_stored_token() {
-                Ok(Some(_)) => {
-                    app_state.update(cx, |state, cx| {
-                        state.repo_add_modal_open = true;
-                        state.auth_modal_open = false;
-                        state.sidebar_open = true;
-                        cx.notify();
-                    });
+            let app_weak_ob = app_state.downgrade();
+            let auth_modal_weak = github_auth_modal.downgrade();
+            cx.spawn(async move |_, cx| {
+                let token = cx
+                    .background_executor()
+                    .spawn(async move { get_stored_token().ok().flatten() })
+                    .await;
+
+                match token {
+                    Some(_) => {
+                        let _ = app_weak_ob.update(cx, |state, cx| {
+                            state.repo_add_modal_open = true;
+                            state.auth_modal_open = false;
+                            state.sidebar_open = true;
+                            cx.notify();
+                        });
+                    }
+                    None => {
+                        let _ = app_weak_ob.update(cx, |state, cx| {
+                            state.pending_post_auth_action = Some(PostAuthAction::AddRepo);
+                            state.auth_modal_open = true;
+                            state.repo_add_modal_open = false;
+                            state.sidebar_open = true;
+                            cx.notify();
+                        });
+                        let _ = auth_modal_weak.update(cx, |modal, cx| modal.init(cx));
+                    }
                 }
-                _ => {
-                    app_state.update(cx, |state, cx| {
-                        state.pending_post_auth_action = Some(PostAuthAction::AddRepo);
-                        state.auth_modal_open = true;
-                        state.repo_add_modal_open = false;
-                        state.sidebar_open = true;
-                        cx.notify();
-                    });
-                    github_auth_modal.update(cx, |modal, cx| modal.init(cx));
-                }
-            }
+            })
+            .detach();
         }
 
         Self {
@@ -388,6 +430,8 @@ impl RootView {
             github_auth_modal,
             repo_add_modal,
             toolbar,
+            repo_modal_token_loading: false,
+            repo_modal_token_resolved_for_open: false,
             _pane_subscription: subscription,
             _root_subscription: root_subscription,
         }
@@ -419,14 +463,6 @@ impl Render for RootView {
         let update_available = app.update_available.clone();
         let update_status = app.update_status;
         let _ = app;
-
-        if repo_add_modal_open {
-            if let Ok(Some(token)) = get_stored_token() {
-                self.repo_add_modal.update(cx, |modal, cx| {
-                    modal.set_auth_token(token, cx);
-                });
-            }
-        }
 
         let dirty_dot = if dirty { "● " } else { "" };
 
@@ -700,10 +736,7 @@ impl Render for RootView {
                                         cx.quit();
                                     } else {
                                         if let Some(path) = state.pending_open_path.take() {
-                                            match FileIo::open(&path) {
-                                                Ok(doc) => state.load_document(doc, cx),
-                                                Err(err) => eprintln!("Open error: {err}"),
-                                            }
+                                            state.pull_and_open_file(path, cx);
                                         }
                                         cx.notify();
                                     }
@@ -723,10 +756,7 @@ impl Render for RootView {
                                             cx.quit();
                                         } else {
                                             if let Some(path) = state.pending_open_path.take() {
-                                                match FileIo::open(&path) {
-                                                    Ok(doc) => state.load_document(doc, cx),
-                                                    Err(err) => eprintln!("Open error: {err}"),
-                                                }
+                                                state.pull_and_open_file(path, cx);
                                             }
                                             state.show_unsaved_prompt = false;
                                             cx.notify();

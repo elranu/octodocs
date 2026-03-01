@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use adabraka_ui::components::confirm_dialog::Dialog as ModalDialog;
 use adabraka_ui::components::input::Input;
@@ -348,8 +349,11 @@ impl GithubSidebar {
                 let indent = depth as f32 * 12.0;
                 let is_renaming = self.rename_target.as_ref() == Some(&path);
                 // Highlight when this row is the sidebar selection OR the currently open document.
-                let is_active = current_doc_path == Some(path.as_path());
-                let is_selected = is_active || self.selected_file.as_deref() == Some(path.as_path());
+                let pending_selected = self.selected_file.as_deref();
+                let has_pending_switch = pending_selected.is_some() && pending_selected != current_doc_path;
+                let is_active = current_doc_path == Some(path.as_path()) && !has_pending_switch;
+                let is_selected = pending_selected == Some(path.as_path()) || is_active;
+                let is_pending_loading = has_pending_switch && pending_selected == Some(path.as_path());
 
                 if is_renaming {
                     let rename_weak = weak.clone();
@@ -389,7 +393,11 @@ impl GithubSidebar {
                             .py(px(4.0))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.tokens.accent))
-                            .when(is_selected && !is_active, |s| s.bg(theme.tokens.accent.opacity(0.5)))
+                            .when(is_selected && !is_active, |s| {
+                                s.bg(theme.tokens.accent)
+                                    .border_l_2()
+                                    .border_color(theme.tokens.primary.opacity(0.6))
+                            })
                             .when(is_active, |s| {
                                 s.bg(theme.tokens.accent)
                                     .border_l_2()
@@ -399,17 +407,29 @@ impl GithubSidebar {
                             .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                                 let _ = row_weak.update(cx, |sidebar, cx| {
                                     sidebar.selected_file = Some(path_for_left.clone());
+                                    cx.notify(); // highlight the row immediately, before the file finishes loading
                                     let ext = path_for_left
                                         .extension()
                                         .and_then(|e| e.to_str())
                                         .map(|e| e.to_ascii_lowercase())
                                         .unwrap_or_default();
                                     if ext == "md" {
-                                        sidebar.app_state.update(cx, |state, cx| {
-                                            state.open_file_from_sidebar(path_for_left.clone(), cx);
-                                        });
-                                    } else {
-                                        cx.notify();
+                                        // Defer open to the next tick so the selection highlight
+                                        // is painted before any state transitions for loading begin.
+                                        let app_state = sidebar.app_state.clone();
+                                        let path = path_for_left.clone();
+                                        cx.spawn(async move |_, cx| {
+                                            let _ = cx
+                                                .background_executor()
+                                                .spawn(async move {
+                                                    std::thread::sleep(Duration::from_millis(16));
+                                                })
+                                                .await;
+                                            let _ = app_state.update(cx, |state, cx| {
+                                                state.open_file_from_sidebar(path, cx);
+                                            });
+                                        })
+                                        .detach();
                                     }
                                 });
                             })
@@ -425,9 +445,22 @@ impl GithubSidebar {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.0))
-                                    .child(Icon::new(IconSource::Named("file".into())).size_3())
-                                    .child(body_small(name)),
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(Icon::new(IconSource::Named("file".into())).size_3())
+                                            .child(body_small(name)),
+                                    )
+                                    .when(is_pending_loading, |s| {
+                                        s.child(
+                                            Icon::new(IconSource::Named("loader".into()))
+                                                .size_3()
+                                                .color(theme.tokens.muted_foreground),
+                                        )
+                                    }),
                             )
                             .into_any_element(),
                     );

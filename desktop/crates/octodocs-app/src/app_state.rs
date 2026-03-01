@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use adabraka_ui::prelude::*;
 use gpui::{Subscription, Task};
-use octodocs_core::{Document, DocumentBlock, Renderer, markdown_to_doc_paragraphs};
+use octodocs_core::{DocParagraph, Document, DocumentBlock, Renderer, doc_paragraphs_to_markdown, markdown_to_doc_paragraphs};
 use octodocs_github::{GitHubSyncConfig, SyncStatus};
 
 /// Copy an external image file into `{doc_dir}/images/` and return the relative URL string.
@@ -301,24 +301,17 @@ impl AppState {
         let github_bindings = Self::load_github_bindings_from_disk();
         let (saved_active_binding_idx, saved_last_opened_file) = Self::load_ui_state_from_disk();
 
-        let mut document = Document::new();
-        if let Some(path) = saved_last_opened_file {
-            if let Ok(doc) = octodocs_core::FileIo::open(&path) {
-                document = doc;
-            }
-        }
-        // Populate the word-style editor with the initial document.
-        let paragraphs = markdown_to_doc_paragraphs(&document.content);
-        let initial_doc_dir = document.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        let document = Document::new();
+        // WYSIWYG is the startup default; split/source blocks are computed lazily
+        // when those modes are entered. The last-opened file is restored async below.
+        let blocks = vec![];
+
+        // Populate the word-style editor with empty content on startup.
+        // The actual document is loaded asynchronously after state is constructed.
         doc_editor.update(cx, |editor, cx| {
-            editor.document_dir = initial_doc_dir;
-            editor.load_document(paragraphs, cx);
+            editor.document_dir = None;
+            editor.load_document(vec![], cx);
         });
-        // Normalize the baseline to what to_markdown() produces so that UI-only
-        // notifications (hover badge, zoom overlay) never create a spurious diff
-        // in the content observer and falsely mark the document as dirty.
-        document.content = doc_editor.read(cx).to_markdown();
-        let blocks = Renderer::parse_blocks(&document.content);
 
         let active_binding_idx = if github_bindings.is_empty() {
             None
@@ -381,6 +374,30 @@ impl AppState {
                 });
             }
         }));
+
+        // Restore the last-opened file asynchronously so app startup is not gated
+        // by file I/O + markdown parsing on the UI thread.
+        if let Some(path) = saved_last_opened_file {
+            state._pull_task = Some(cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let doc = octodocs_core::FileIo::open(&path)?;
+                        let content = doc.content.clone();
+                        let paragraphs = markdown_to_doc_paragraphs(&content);
+                        let blocks = Renderer::parse_blocks(&content);
+                        let normalized = doc_paragraphs_to_markdown(&paragraphs);
+                        Ok::<_, anyhow::Error>((doc, paragraphs, blocks, normalized))
+                    })
+                    .await;
+                let _ = this.update(cx, |state, cx| match result {
+                    Ok((doc, paragraphs, blocks, normalized)) => {
+                        state.load_document_parsed(doc, paragraphs, blocks, normalized, cx)
+                    }
+                    Err(e) => eprintln!("Startup restore error: {e}"),
+                });
+            }));
+        }
 
         state
     }
@@ -497,18 +514,37 @@ impl AppState {
         self.pull_and_open_file(path, cx);
     }
 
-    /// Fetch the latest version of `path` from GitHub (if a sync binding and token exist),
+    /// Fetch the latest version of `path` from GitHub (if a sync binding exists),
     /// overwrite the local file on success, then load the document into the editor.
     /// All error paths fall back to opening whatever is on disk — no crash, no dialog.
-    fn pull_and_open_file(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
-        // Resolve sync binding — fall back to local open if none.
-        let (token, config, filename) = match self.resolve_pull_params(&path) {
+    /// Public so that view code can call it directly (e.g. "Open" toolbar button, Discard prompt).
+    pub fn pull_and_open_file(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        // Resolve sync binding metadata — fall back to async local open if none.
+        // Token lookup is intentionally done on the background executor to keep UI responsive.
+        let (config, filename) = match self.resolve_pull_params(&path) {
             Some(params) => params,
             None => {
-                match octodocs_core::FileIo::open(&path) {
-                    Ok(doc) => self.load_document(doc, cx),
-                    Err(err) => eprintln!("Open error: {err}"),
-                }
+                // No GitHub binding — open the local file on a background thread
+                // so disk I/O + markdown parsing never blocks the UI.
+                self._pull_task = Some(cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let doc = octodocs_core::FileIo::open(&path)?;
+                            let content = doc.content.clone();
+                            let paragraphs = markdown_to_doc_paragraphs(&content);
+                            let blocks = Renderer::parse_blocks(&content);
+                            let normalized = doc_paragraphs_to_markdown(&paragraphs);
+                            Ok::<_, anyhow::Error>((doc, paragraphs, blocks, normalized))
+                        })
+                        .await;
+                    let _ = this.update(cx, |state, cx| match result {
+                        Ok((doc, paragraphs, blocks, normalized)) => {
+                            state.load_document_parsed(doc, paragraphs, blocks, normalized, cx)
+                        }
+                        Err(e) => eprintln!("Open error: {e}"),
+                    });
+                }));
                 return;
             }
         };
@@ -519,75 +555,105 @@ impl AppState {
         self._pull_task = Some(cx.spawn(async move |this, cx| {
             let path_fallback = path.clone();
 
-            let result: anyhow::Result<(bool, Document)> = cx
+            let result: anyhow::Result<(bool, Document, Vec<DocParagraph>, Vec<DocumentBlock>, String)> = cx
                 .background_executor()
                 .spawn(async move {
-                    let pulled = octodocs_github::pull_file(&token, &config, &filename)?;
-                    if let Some(content) = pulled {
-                        std::fs::write(&path, content.as_bytes())
-                            .map_err(|e| anyhow::anyhow!("Failed to write pulled content to '{}': {e}", path.display()))?;
-                        let doc = octodocs_core::FileIo::open(&path)?;
-                        Ok((true, doc))
+                    let token = octodocs_github::get_stored_token().ok().flatten();
+                    let (pulled, doc) = if let Some(token) = token {
+                        let pulled = octodocs_github::pull_file(&token, &config, &filename)?;
+                        let doc = if let Some(content) = pulled.clone() {
+                            std::fs::write(&path, content.as_bytes()).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to write pulled content to '{}': {e}",
+                                    path.display()
+                                )
+                            })?;
+                            octodocs_core::FileIo::open(&path)?
+                        } else {
+                            // 404 — file not yet on GitHub; open local copy.
+                            octodocs_core::FileIo::open(&path)?
+                        };
+                        (pulled.is_some(), doc)
                     } else {
-                        // 404 — file not yet on GitHub; open local copy.
-                        let doc = octodocs_core::FileIo::open(&path)?;
-                        Ok((false, doc))
-                    }
+                        // No token available — silently fall back to local open.
+                        (false, octodocs_core::FileIo::open(&path)?)
+                    };
+                    let content = doc.content.clone();
+                    let paragraphs = markdown_to_doc_paragraphs(&content);
+                    let blocks = Renderer::parse_blocks(&content);
+                    let normalized = doc_paragraphs_to_markdown(&paragraphs);
+                    Ok((pulled, doc, paragraphs, blocks, normalized))
                 })
                 .await;
 
             let _ = this.update(cx, |state, cx| match result {
-                Ok((_pulled, doc)) => {
+                Ok((_pulled, doc, paragraphs, blocks, normalized)) => {
                     state.github_sync_status = SyncStatus::Idle;
-                    state.load_document(doc, cx);
+                    state.load_document_parsed(doc, paragraphs, blocks, normalized, cx);
                 }
                 Err(err) => {
                     state.github_sync_status = SyncStatus::Failed {
                         message: err.to_string(),
                     };
-                    match octodocs_core::FileIo::open(&path_fallback) {
-                        Ok(doc) => state.load_document(doc, cx),
-                        Err(e) => eprintln!("Open error: {e}"),
-                    }
                     cx.notify();
+                    // Open fallback on background thread — never block the UI.
+                    state._pull_task = Some(cx.spawn(async move |this, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let doc = octodocs_core::FileIo::open(&path_fallback)?;
+                                let content = doc.content.clone();
+                                let paragraphs = markdown_to_doc_paragraphs(&content);
+                                let blocks = Renderer::parse_blocks(&content);
+                                let normalized = doc_paragraphs_to_markdown(&paragraphs);
+                                Ok::<_, anyhow::Error>((doc, paragraphs, blocks, normalized))
+                            })
+                            .await;
+                        let _ = this.update(cx, |state, cx| match result {
+                            Ok((doc, paragraphs, blocks, normalized)) => {
+                                state.load_document_parsed(doc, paragraphs, blocks, normalized, cx)
+                            }
+                            Err(e) => eprintln!("Open error: {e}"),
+                        });
+                    }));
                 }
             });
         }));
     }
 
     /// Resolve the GitHub pull parameters for `path`.
-    /// Returns `None` if no binding, no token, or no relative path can be computed.
-    fn resolve_pull_params(&self, path: &Path) -> Option<(String, octodocs_github::GitHubSyncConfig, String)> {
+    /// Returns `None` if no binding or no relative path can be computed.
+    fn resolve_pull_params(&self, path: &Path) -> Option<(octodocs_github::GitHubSyncConfig, String)> {
         let binding = self.find_sync_binding(path)?;
         let filename = Self::relative_sync_path(binding, path)?;
-        let token = octodocs_github::get_stored_token().ok()??;
-        Some((token, binding.config.clone(), filename))
+        Some((binding.config.clone(), filename))
     }
 
-    /// Load a document from disk.
-    pub fn load_document(&mut self, doc: Document, cx: &mut Context<AppState>) {
-        let content = doc.content.clone();
-        self.blocks = Renderer::parse_blocks(&content);
-        // Populate the word-style editor with the new content.
-        // Increment loading_doc so the observer doesn't mark dirty for these notifications.
-        let paragraphs = markdown_to_doc_paragraphs(&content);
+    /// Load an already-parsed document — all heavy work (parsing, normalization) was
+    /// done on a background thread before this call so the UI thread is never blocked.
+    pub fn load_document_parsed(
+        &mut self,
+        doc: Document,
+        paragraphs: Vec<DocParagraph>,
+        blocks: Vec<DocumentBlock>,
+        normalized_content: String,
+        cx: &mut Context<AppState>,
+    ) {
+        self.blocks = if self.view_mode == ViewMode::Wysiwyg { vec![] } else { blocks };
         let doc_dir = doc.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
         self.loading_doc += 1;
         self.doc_editor.update(cx, |editor, cx| {
             editor.document_dir = doc_dir;
             editor.load_document(paragraphs, cx);
         });
-        // If currently in Source/Split, populate the full editor too.
         if self.view_mode != ViewMode::Wysiwyg {
             self.loading_doc += 1;
-            let c = content.clone();
+            let c = normalized_content.clone();
             self.full_editor_state.update(cx, |state, cx| state.set_content(&c, cx));
         }
         self.document = doc;
-        // Normalize: store the to_markdown() form as the dirty-check baseline so
-        // that UI-only state changes (hover badge, zoom overlay) that call
-        // cx.notify() on doc_editor never produce a false dirty flag.
-        self.document.content = self.doc_editor.read(cx).to_markdown();
+        // Already normalized — no to_markdown() call needed on the UI thread.
+        self.document.content = normalized_content;
         self.dirty = false;
         self.persist_ui_state_to_disk();
         cx.notify();
