@@ -156,6 +156,10 @@ pub struct DocumentEditorState {
     pub hovered_image_para: Option<usize>,
     /// Index of the mermaid paragraph the mouse is currently hovering over (for magnifier badge).
     pub hovered_mermaid_para: Option<usize>,
+    /// Per-paragraph total visual pixel height (text only, excl. PARA_GAP).
+    /// Populated each paint pass; used by request_layout/prepaint to size the
+    /// scroll area correctly after word-wrap is computed.
+    pub para_visual_heights: Vec<f32>,
 }
 
 impl DocumentEditorState {
@@ -176,6 +180,7 @@ impl DocumentEditorState {
             image_zoom: None,
             hovered_image_para: None,
             hovered_mermaid_para: None,
+            para_visual_heights: Vec::new(),
         }
     }
 
@@ -195,6 +200,7 @@ impl DocumentEditorState {
         self.image_zoom = None;
         self.hovered_image_para = None;
         self.hovered_mermaid_para = None;
+        self.para_visual_heights.clear();
         self.drag_occurred = false;
         self.table_cursor = None;
         // Evict image / mermaid decode caches when loading a new document so
@@ -1800,7 +1806,7 @@ impl Element for DocumentEditorElement {
         let state = self.state.read(cx);
         let mut total_h = TOP_PADDING;
 
-        for para in &state.paragraphs {
+        for (para_idx, para) in state.paragraphs.iter().enumerate() {
             let lh = para_line_height(&para.kind);
             match &para.kind {
                 ParagraphKind::Mermaid(_) => {
@@ -1818,10 +1824,13 @@ impl Element for DocumentEditorElement {
                     total_h += table_height(headers, rows) + PARA_GAP;
                 }
                 _ => {
-                    // Count visual lines by counting '\n's in plain text
+                    // Count visual lines by counting '\n's in plain text;
+                    // if we have cached wrapped heights from a previous paint
+                    // pass, use those instead for accurate wrapping scroll size.
                     let text = para.plain_text();
                     let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
-                    total_h += lh * line_count as f32 + PARA_GAP;
+                    let cached_h = state.para_visual_heights.get(para_idx).copied();
+                    total_h += cached_h.unwrap_or(lh * line_count as f32) + PARA_GAP;
                 }
             }
         }
@@ -1845,7 +1854,7 @@ impl Element for DocumentEditorElement {
     ) -> Self::PrepaintState {
         let state = self.state.read(cx);
         let mut total_h = TOP_PADDING;
-        for para in &state.paragraphs {
+        for (para_idx, para) in state.paragraphs.iter().enumerate() {
             let lh = para_line_height(&para.kind);
             match &para.kind {
                 ParagraphKind::Mermaid(_) => {
@@ -1863,7 +1872,8 @@ impl Element for DocumentEditorElement {
                 _ => {
                     let text = para.plain_text();
                     let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
-                    total_h += lh * line_count as f32 + PARA_GAP;
+                    let cached_h = state.para_visual_heights.get(para_idx).copied();
+                    total_h += cached_h.unwrap_or(lh * line_count as f32) + PARA_GAP;
                 }
             }
         }
@@ -1915,8 +1925,11 @@ impl Element for DocumentEditorElement {
 
         let mut current_y: f32 = TOP_PADDING;
         let left: Pixels = bounds.left() + px(LEFT_MARGIN);
+        let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
         let mut visual_lines: Vec<VisualLine> = Vec::new();
         let mut line_layouts: Vec<Option<ShapedLine>> = Vec::new();
+        // Per-paragraph visual heights accumulated this frame.
+        let mut para_visual_heights: Vec<f32> = Vec::new();
 
         for (para_idx, para) in paragraphs.iter().enumerate() {
             let kind = &para.kind;
@@ -2462,26 +2475,33 @@ impl Element for DocumentEditorElement {
                 }
             }
 
-            // Split paragraph text at '\n' to get visual sub-lines
+            // Split paragraph text at '\n' to get visual sub-lines, then
+            // word-wrap each sub-line to fit within block_w.
             let flat = para.plain_text();
             let sublines: Vec<&str> = flat.split('\n').collect();
             let mut char_start = 0usize;
-
+            let mut para_h = 0.0f32;
 
             for subline in &sublines {
                 let char_count = subline.chars().count();
                 let char_end = char_start + char_count;
                 let line_y_screen = bounds.top() + px(current_y);
 
-                // Shape the line and compute per-character x-positions for
-                // accurate mouse hit-testing (stored in VisualLine::glyph_xs).
-                let glyph_xs: Vec<Pixels>;
-                let shaped_line: Option<ShapedLine>;
-
                 if subline.is_empty() {
                     // Empty line — cursor sits at x=0 relative to margin.
-                    glyph_xs = vec![px(0.0)];
-                    shaped_line = None;
+                    visual_lines.push(VisualLine {
+                        para_idx,
+                        char_start,
+                        char_end,
+                        top_px: current_y,
+                        height_px: line_height,
+                        font_size_px,
+                        is_mermaid: false,
+                        glyph_xs: vec![px(0.0)],
+                    });
+                    line_layouts.push(None);
+                    current_y += line_height;
+                    para_h += line_height;
                 } else {
                     let (line_text, runs) = spans_to_text_runs(
                         &para.spans,
@@ -2494,55 +2514,145 @@ impl Element for DocumentEditorElement {
                         &mono_family,
                     );
                     let total_run_bytes: usize = runs.iter().map(|r| r.len).sum();
+
                     if !line_text.is_empty() && total_run_bytes > 0 {
-                        let shaped = window.text_system().shape_line(
+                        // Use shape_text with word-wrap so long lines break visually.
+                        let wrap_result = window.text_system().shape_text(
                             line_text.clone().into(),
                             font_size,
                             &runs,
+                            Some(block_w),
                             None,
                         );
-                        // glyph_xs[i] = left-edge x of char i (relative to left margin).
-                        // glyph_xs[char_count] = right-edge of last char (cursor-after-end).
-                        let char_count = char_end - char_start;
-                        glyph_xs = (0..=char_count)
-                            .map(|ci| shaped.x_for_index(chars_to_bytes(subline, ci)))
-                            .collect();
-                        let _ = shaped.paint(point(left, line_y_screen), lh_px, window, cx);
-                        shaped_line = Some(shaped);
+
+                        let wrapped = wrap_result.ok().and_then(|mut v| v.drain(..).next());
+
+                        if let Some(wl) = wrapped {
+                            // Paint the full wrapped block in one call.
+                            let _ = wl.paint(
+                                point(left, line_y_screen),
+                                lh_px,
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+
+                            // Split into per-visual-row VisualLine entries using wrap
+                            // boundaries from the layout so cursor and selection work.
+                            let unwrapped = &wl.unwrapped_layout;
+
+                            // Collect byte offsets where each row ends.
+                            let mut row_end_bytes: Vec<usize> = wl
+                                .wrap_boundaries
+                                .iter()
+                                .map(|wb| {
+                                    unwrapped
+                                        .runs
+                                        .get(wb.run_ix)
+                                        .and_then(|r| r.glyphs.get(wb.glyph_ix))
+                                        .map(|g| g.index)
+                                        .unwrap_or(line_text.len())
+                                })
+                                .collect();
+                            row_end_bytes.push(line_text.len());
+
+                            let num_rows = row_end_bytes.len();
+                            let mut row_start_byte = 0usize;
+                            let mut row_char_start = char_start;
+
+                            for (row_idx, &row_end_byte) in row_end_bytes.iter().enumerate() {
+                                let row_text = &line_text[row_start_byte..row_end_byte];
+                                let row_char_count = row_text.chars().count();
+                                let row_char_end = row_char_start + row_char_count;
+
+                                // x base in the unwrapped layout for this visual row.
+                                let row_base_x = if row_start_byte == 0 {
+                                    px(0.0)
+                                } else {
+                                    unwrapped.x_for_index(row_start_byte)
+                                };
+
+                                // glyph_xs: char-indexed positions relative to row start.
+                                let gc = row_char_end - row_char_start;
+                                let row_glyph_xs: Vec<Pixels> = (0..=gc)
+                                    .map(|ci| {
+                                        let byte =
+                                            row_start_byte + chars_to_bytes(row_text, ci);
+                                        unwrapped.x_for_index(byte) - row_base_x
+                                    })
+                                    .collect();
+
+                                visual_lines.push(VisualLine {
+                                    para_idx,
+                                    char_start: row_char_start,
+                                    char_end: row_char_end,
+                                    top_px: current_y + row_idx as f32 * line_height,
+                                    height_px: line_height,
+                                    font_size_px,
+                                    is_mermaid: false,
+                                    glyph_xs: row_glyph_xs,
+                                });
+                                line_layouts.push(None);
+
+                                row_start_byte = row_end_byte;
+                                row_char_start = row_char_end;
+                            }
+
+                            let total_h = num_rows as f32 * line_height;
+                            current_y += total_h;
+                            para_h += total_h;
+                        } else {
+                            // shape_text failed — fallback: render as single unshaped line.
+                            visual_lines.push(VisualLine {
+                                para_idx,
+                                char_start,
+                                char_end,
+                                top_px: current_y,
+                                height_px: line_height,
+                                font_size_px,
+                                is_mermaid: false,
+                                glyph_xs: vec![px(0.0)],
+                            });
+                            line_layouts.push(None);
+                            current_y += line_height;
+                            para_h += line_height;
+                        }
                     } else {
-                        glyph_xs = vec![px(0.0)];
-                        shaped_line = None;
+                        // Zero-length or zero-run line.
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start,
+                            char_end,
+                            top_px: current_y,
+                            height_px: line_height,
+                            font_size_px,
+                            is_mermaid: false,
+                            glyph_xs: vec![px(0.0)],
+                        });
+                        line_layouts.push(None);
+                        current_y += line_height;
+                        para_h += line_height;
                     }
                 }
 
-                visual_lines.push(VisualLine {
-                    para_idx,
-                    char_start,
-                    char_end,
-                    top_px: current_y,
-                    height_px: line_height,
-                    font_size_px,
-                    is_mermaid: false,
-                    glyph_xs,
-                });
-                line_layouts.push(shaped_line);
-
                 char_start = char_end + 1;
-                current_y += line_height;
             }
 
+            para_visual_heights.push(para_h);
             current_y += PARA_GAP;
         }
 
-        // Store layout cache in state for cursor/mouse use
+        // Store layout cache and per-paragraph visual heights in state.
         self.state.update(cx, |s, _| {
             s.layout_cache = visual_lines.clone();
+            s.para_visual_heights = para_visual_heights;
         });
 
         // ── Selection highlight ──────────────────────────────────────────────
         if let Some(sel) = selection {
             let (sel_start, sel_end) = sel.ordered();
-            for (vl_idx, vl) in visual_lines.iter().enumerate() {
+            for (_, vl) in visual_lines.iter().enumerate() {
                 if vl.is_mermaid { continue; }
                 let vl_para = vl.para_idx;
                 let vl_cs = vl.char_start;
@@ -2567,18 +2677,12 @@ impl Element for DocumentEditorElement {
                 };
 
                 let line_y_screen = bounds.top() + px(vl.top_px);
-                let (sel_x_start, sel_width) = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
+                let (sel_x_start, sel_width) = {
                     let col_s = sel_s_in_vl - vl_cs;
                     let col_e = sel_e_in_vl - vl_cs;
-                    let vl_text: String = paragraphs[vl_para].plain_text()
-                        .chars().skip(vl_cs).take(vl_ce - vl_cs).collect();
-                    let byte_s = chars_to_bytes(&vl_text, col_s);
-                    let byte_e = chars_to_bytes(&vl_text, col_e);
-                    let x_s = shaped.x_for_index(byte_s);
-                    let x_e = shaped.x_for_index(byte_e);
+                    let x_s = vl.glyph_xs.get(col_s).copied().unwrap_or(px(0.0));
+                    let x_e = vl.glyph_xs.get(col_e).copied().unwrap_or(x_s);
                     (left + x_s, x_e - x_s)
-                } else {
-                    (left, px(0.0))
                 };
 
                 if sel_width > px(0.0) {
@@ -2601,17 +2705,14 @@ impl Element for DocumentEditorElement {
                     && cursor.char_offset <= vl.char_end
             });
 
-            if let Some((vl_idx, vl)) = cur_vl {
+            if let Some((_, vl)) = cur_vl {
                 // Tables draw their own cell caret in the table paint block above.
                 if !matches!(&paragraphs[vl.para_idx].kind, ParagraphKind::Table { .. }) {
                 let col = cursor.char_offset - vl.char_start;
-                let cursor_x = if let Some(Some(shaped)) = line_layouts.get(vl_idx) {
-                    let vl_text: String = paragraphs[vl.para_idx].plain_text()
-                        .chars().skip(vl.char_start).take(vl.char_end - vl.char_start).collect();
-                    let byte_col = chars_to_bytes(&vl_text, col);
-                    left + shaped.x_for_index(byte_col)
-                } else {
-                    left
+                let cursor_x = {
+                    vl.glyph_xs.get(col).copied()
+                        .map(|x| left + x)
+                        .unwrap_or(left)
                 };
                 let cursor_y_screen = bounds.top() + px(vl.top_px);
 
