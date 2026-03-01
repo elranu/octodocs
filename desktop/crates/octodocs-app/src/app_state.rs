@@ -514,11 +514,26 @@ impl AppState {
         self.pull_and_open_file(path, cx);
     }
 
+    fn clear_document_for_open(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        self.document.path = Some(path);
+        self.document.content.clear();
+        self.blocks.clear();
+        self.dirty = false;
+        self.loading_doc += 1;
+        self.doc_editor.update(cx, |editor, _| {
+            editor.clear();
+        });
+        self.persist_ui_state_to_disk();
+        cx.notify();
+    }
+
     /// Fetch the latest version of `path` from GitHub (if a sync binding exists),
     /// overwrite the local file on success, then load the document into the editor.
     /// All error paths fall back to opening whatever is on disk — no crash, no dialog.
     /// Public so that view code can call it directly (e.g. "Open" toolbar button, Discard prompt).
     pub fn pull_and_open_file(&mut self, path: PathBuf, cx: &mut Context<AppState>) {
+        self.clear_document_for_open(path.clone(), cx);
+
         // Resolve sync binding metadata — fall back to async local open if none.
         // Token lookup is intentionally done on the background executor to keep UI responsive.
         let (config, filename) = match self.resolve_pull_params(&path) {

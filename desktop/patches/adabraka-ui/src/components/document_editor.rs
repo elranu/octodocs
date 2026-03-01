@@ -184,13 +184,7 @@ impl DocumentEditorState {
         }
     }
 
-    /// Replace the document content. Cursor resets to the beginning.
-    pub fn load_document(&mut self, paragraphs: Vec<DocParagraph>, cx: &mut Context<Self>) {
-        self.paragraphs = if paragraphs.is_empty() {
-            vec![DocParagraph::empty()]
-        } else {
-            paragraphs
-        };
+    fn reset_transient_state(&mut self) {
         self.cursor = DocCursor::zero();
         self.selection = None;
         self.marked_range = None;
@@ -203,11 +197,24 @@ impl DocumentEditorState {
         self.para_visual_heights.clear();
         self.drag_occurred = false;
         self.table_cursor = None;
-        // Evict image / mermaid decode caches when loading a new document so
-        // stale bitmaps (e.g. images deleted or replaced on disk) are not shown.
         IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_DIMS_CACHE.with(|cache| cache.borrow_mut().clear());
+    }
+
+    pub fn clear(&mut self) {
+        self.paragraphs = vec![DocParagraph::empty()];
+        self.reset_transient_state();
+    }
+
+    /// Replace the document content. Cursor resets to the beginning.
+    pub fn load_document(&mut self, paragraphs: Vec<DocParagraph>, cx: &mut Context<Self>) {
+        self.paragraphs = if paragraphs.is_empty() {
+            vec![DocParagraph::empty()]
+        } else {
+            paragraphs
+        };
+        self.reset_transient_state();
         cx.notify();
     }
 
@@ -1484,6 +1491,7 @@ impl Render for DocumentEditorState {
 const LEFT_MARGIN: f32 = 48.0;
 const TOP_PADDING: f32 = 24.0;
 const PARA_GAP: f32 = 8.0;
+const VIEWPORT_OVERSCAN_PX: f32 = 300.0;
 /// Fallback height used before a mermaid diagram has been rendered for the first time.
 const MERMAID_HEIGHT_LOADING: f32 = 120.0;
 /// Maximum display height for a mermaid diagram (prevents extremely tall diagrams).
@@ -1917,10 +1925,32 @@ impl Element for DocumentEditorElement {
         let code_color = theme.tokens.primary.opacity(0.85);
         let selection_color = theme.tokens.primary.opacity(0.22);
         let caret_color = theme.tokens.primary;
+        let viewport = window.viewport_size();
+        let viewport_top = px(0.0);
+        let viewport_bottom = px(f32::from(viewport.height));
+        let overscan = px(VIEWPORT_OVERSCAN_PX);
 
-        let (paragraphs, cursor, selection, table_cursor) = {
+        let (
+            paragraphs,
+            cursor,
+            selection,
+            table_cursor,
+            cached_para_heights,
+            doc_dir,
+            hovered_image_para,
+            hovered_mermaid_para,
+        ) = {
             let s = self.state.read(cx);
-            (s.paragraphs.clone(), s.cursor, s.selection, s.table_cursor)
+            (
+                s.paragraphs.clone(),
+                s.cursor,
+                s.selection,
+                s.table_cursor,
+                s.para_visual_heights.clone(),
+                s.document_dir.clone(),
+                s.hovered_image_para,
+                s.hovered_mermaid_para,
+            )
         };
 
         let mut current_y: f32 = TOP_PADDING;
@@ -1930,6 +1960,11 @@ impl Element for DocumentEditorElement {
         let mut line_layouts: Vec<Option<ShapedLine>> = Vec::new();
         // Per-paragraph visual heights accumulated this frame.
         let mut para_visual_heights: Vec<f32> = Vec::new();
+        let is_in_viewport = |top_doc_y: f32, block_h: f32| {
+            let top_screen = bounds.top() + px(top_doc_y);
+            let bottom_screen = top_screen + px(block_h.max(1.0));
+            bottom_screen >= viewport_top - overscan && top_screen <= viewport_bottom + overscan
+        };
 
         for (para_idx, para) in paragraphs.iter().enumerate() {
             let kind = &para.kind;
@@ -1937,6 +1972,15 @@ impl Element for DocumentEditorElement {
             let line_height = para_line_height(kind);
             let font_size = px(font_size_px);
             let lh_px = px(line_height);
+            let fallback_para_h = cached_para_heights
+                .get(para_idx)
+                .copied()
+                .unwrap_or_else(|| {
+                    let text = para.plain_text();
+                    let line_count = (text.chars().filter(|&c| c == '\n').count() + 1).max(1);
+                    line_height * line_count as f32
+                })
+                .max(line_height);
 
             let para_color = match kind {
                 ParagraphKind::Heading(_) => theme.tokens.foreground,
@@ -1946,6 +1990,23 @@ impl Element for DocumentEditorElement {
 
             match kind {
                 ParagraphKind::Mermaid(_) => {
+                    if !is_in_viewport(current_y, fallback_para_h) {
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: para.char_count(),
+                            top_px: current_y,
+                            height_px: fallback_para_h,
+                            font_size_px,
+                            is_mermaid: true,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(fallback_para_h);
+                        current_y += fallback_para_h + PARA_GAP;
+                        continue;
+                    }
+
                     // The actual mermaid source is stored in para.spans, not in the PathBuf field.
                     let mermaid_source = para.plain_text();
                     let top_screen = bounds.top() + px(current_y);
@@ -2020,7 +2081,7 @@ impl Element for DocumentEditorElement {
                             let _ = window.paint_image(paint_bounds, gpui::Corners::default(), ri, 0, false);
                         }
                         // Magnifier badge in top-right corner when hovered.
-                        let is_hovered = self.state.read(cx).hovered_mermaid_para == Some(para_idx);
+                        let is_hovered = hovered_mermaid_para == Some(para_idx);
                         if is_hovered {
                             let badge_size = 32.0_f32;
                             let badge_x = left + block_w - px(badge_size + 8.0);
@@ -2112,7 +2173,23 @@ impl Element for DocumentEditorElement {
                 }
                 ParagraphKind::Image { path, height, .. } => {
                     let img_height = *height;
-                    let doc_dir = self.state.read(cx).document_dir.clone();
+                    if !is_in_viewport(current_y, img_height) {
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: para.char_count(),
+                            top_px: current_y,
+                            height_px: img_height,
+                            font_size_px,
+                            is_mermaid: false,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(img_height);
+                        current_y += img_height + PARA_GAP;
+                        continue;
+                    }
+
                     let abs_path = doc_dir
                         .as_ref()
                         .map(|d| d.join(path.as_str()))
@@ -2190,7 +2267,7 @@ impl Element for DocumentEditorElement {
                     ));
 
                     // Magnifier badge in top-right corner when hovered.
-                    let is_hovered = self.state.read(cx).hovered_image_para == Some(para_idx);
+                    let is_hovered = hovered_image_para == Some(para_idx);
                     if is_hovered {
                         let badge_size = 32.0_f32;
                         let badge_x = left + block_w - px(badge_size + 8.0);
@@ -2242,6 +2319,22 @@ impl Element for DocumentEditorElement {
                 }
                 ParagraphKind::Table { headers, rows, .. } => {
                     let th = table_height(headers, rows);
+                    if !is_in_viewport(current_y, th) {
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: para.char_count(),
+                            top_px: current_y,
+                            height_px: th,
+                            font_size_px,
+                            is_mermaid: false,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        para_visual_heights.push(th);
+                        current_y += th + PARA_GAP;
+                        continue;
+                    }
                     let table_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
                     let col_count = headers.len().max(1);
                     // col_w_f32: raw f32 for arithmetic (Pixels/Pixels = f32)
@@ -2406,6 +2499,23 @@ impl Element for DocumentEditorElement {
                     continue;
                 }
                 _ => {}
+            }
+
+            if !is_in_viewport(current_y, fallback_para_h) {
+                visual_lines.push(VisualLine {
+                    para_idx,
+                    char_start: 0,
+                    char_end: para.char_count(),
+                    top_px: current_y,
+                    height_px: fallback_para_h,
+                    font_size_px,
+                    is_mermaid: false,
+                    glyph_xs: vec![px(0.0)],
+                });
+                line_layouts.push(None);
+                para_visual_heights.push(fallback_para_h);
+                current_y += fallback_para_h + PARA_GAP;
+                continue;
             }
 
             // For code fences, draw a background rect first
