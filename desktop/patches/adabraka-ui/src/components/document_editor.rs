@@ -197,6 +197,7 @@ impl DocumentEditorState {
         // stale bitmaps (e.g. images deleted or replaced on disk) are not shown.
         IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_CACHE.with(|cache| cache.borrow_mut().clear());
+        MERMAID_DIMS_CACHE.with(|cache| cache.borrow_mut().clear());
         cx.notify();
     }
 
@@ -1473,7 +1474,12 @@ impl Render for DocumentEditorState {
 const LEFT_MARGIN: f32 = 48.0;
 const TOP_PADDING: f32 = 24.0;
 const PARA_GAP: f32 = 8.0;
-const MERMAID_HEIGHT: f32 = 180.0;
+/// Fallback height used before a mermaid diagram has been rendered for the first time.
+const MERMAID_HEIGHT_LOADING: f32 = 120.0;
+/// Maximum display height for a mermaid diagram (prevents extremely tall diagrams).
+const MAX_MERMAID_HEIGHT: f32 = 600.0;
+/// Minimum display height so even tiny diagrams have a visible block.
+const MIN_MERMAID_HEIGHT: f32 = 80.0;
 const IMAGE_BLOCK_DEFAULT_HEIGHT: f32 = 300.0;
 
 // Per-process image decode cache: path string → decoded BGRA RenderImage.
@@ -1485,14 +1491,31 @@ thread_local! {
     /// Mermaid source hash → rendered RenderImage (Ok) or failed flag (Err).
     static MERMAID_CACHE: RefCell<std::collections::HashMap<u64, Result<Arc<RenderImage>, ()>>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Mermaid source hash → natural (logical) dimensions (width, height) in SVG pixels.
+    static MERMAID_DIMS_CACHE: RefCell<std::collections::HashMap<u64, (f32, f32)>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// Compute a stable u64 hash for a mermaid source string.
+/// Uses the same seed as preview_pane so both share the same /tmp PNG + .dims files.
 fn mermaid_source_hash(source: &str) -> u64 {
     let mut h = DefaultHasher::new();
-    "mermaid-v1".hash(&mut h);
+    "mermaid-cache-v5".hash(&mut h);
     source.hash(&mut h);
     h.finish()
+}
+
+/// Return the proportional display height for a mermaid block given the container width.
+/// Falls back to MERMAID_HEIGHT_LOADING if dimensions are not yet known.
+fn mermaid_display_height(key: u64, block_w: f32) -> f32 {
+    let dims = MERMAID_DIMS_CACHE.with(|c| c.borrow().get(&key).copied());
+    if let Some((nw, nh)) = dims {
+        if nw > 0.0 {
+            let h = nh * (block_w / nw);
+            return h.clamp(MIN_MERMAID_HEIGHT, MAX_MERMAID_HEIGHT);
+        }
+    }
+    MERMAID_HEIGHT_LOADING
 }
 const TABLE_ROW_H: f32 = 28.0;
 const TABLE_CELL_PAD_X: f32 = 8.0;
@@ -1777,7 +1800,12 @@ impl Element for DocumentEditorElement {
             let lh = para_line_height(&para.kind);
             match &para.kind {
                 ParagraphKind::Mermaid(_) => {
-                    total_h += MERMAID_HEIGHT + PARA_GAP;
+                    let source = para.plain_text();
+                    let key = mermaid_source_hash(&source);
+                    let approx_w = state.last_bounds
+                        .map(|b| f32::from(b.size.width) - LEFT_MARGIN * 2.0)
+                        .unwrap_or(760.0);
+                    total_h += mermaid_display_height(key, approx_w) + PARA_GAP;
                 }
                 ParagraphKind::Image { height, .. } => {
                     total_h += height + PARA_GAP;
@@ -1816,7 +1844,14 @@ impl Element for DocumentEditorElement {
         for para in &state.paragraphs {
             let lh = para_line_height(&para.kind);
             match &para.kind {
-                ParagraphKind::Mermaid(_) => total_h += MERMAID_HEIGHT + PARA_GAP,
+                ParagraphKind::Mermaid(_) => {
+                    let source = para.plain_text();
+                    let key = mermaid_source_hash(&source);
+                    let approx_w = state.last_bounds
+                        .map(|b| f32::from(b.size.width) - LEFT_MARGIN * 2.0)
+                        .unwrap_or(760.0);
+                    total_h += mermaid_display_height(key, approx_w) + PARA_GAP;
+                }
                 ParagraphKind::Image { height, .. } => total_h += height + PARA_GAP,
                 ParagraphKind::Table { headers, rows, .. } => {
                     total_h += table_height(headers, rows) + PARA_GAP;
@@ -1910,11 +1945,26 @@ impl Element for DocumentEditorElement {
                         let cache_dir = std::env::temp_dir().join("octodocs-mermaid-cache");
                         let _ = std::fs::create_dir_all(&cache_dir);
                         let png_path = cache_dir.join(format!("{key}.png"));
+                        let dims_path = cache_dir.join(format!("{key}.dims"));
+                        // Load or render the PNG, and always populate the dims cache.
                         let result = if png_path.exists() {
+                            // Read dims sidecar if present.
+                            if let Ok(raw) = std::fs::read_to_string(&dims_path) {
+                                let mut parts = raw.split_whitespace();
+                                if let (Some(w), Some(h)) = (parts.next(), parts.next()) {
+                                    if let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>()) {
+                                        MERMAID_DIMS_CACHE.with(|c| c.borrow_mut().insert(key, (w, h)));
+                                    }
+                                }
+                            }
                             std::fs::read(&png_path).ok()
                         } else {
                             match octodocs_core::mermaid::render_png(&mermaid_source, &png_path) {
-                                Ok(_) => std::fs::read(&png_path).ok(),
+                                Ok((nw, nh)) => {
+                                    MERMAID_DIMS_CACHE.with(|c| c.borrow_mut().insert(key, (nw, nh)));
+                                    let _ = std::fs::write(&dims_path, format!("{nw} {nh}"));
+                                    std::fs::read(&png_path).ok()
+                                }
                                 Err(_) => None,
                             }
                         };
@@ -1935,23 +1985,41 @@ impl Element for DocumentEditorElement {
                         let img_size = ri.size(0);
                         let iw = img_size.width.0 as f32;
                         let ih = img_size.height.0 as f32;
+                        // Compute proportional display height from natural dims.
+                        // Use the RenderImage pixel aspect ratio as fallback if dims cache isn't populated yet.
+                        let display_h = mermaid_display_height(key, f32::from(block_w));
                         if iw > 0.0 && ih > 0.0 {
-                            let scale = (f32::from(block_w) / iw).min(MERMAID_HEIGHT / ih);
+                            // Fit the image into the block proportionally (no letterbox padding).
+                            let display_w = f32::from(block_w);
+                            let scale = (display_w / iw).min(display_h / ih);
                             let dw = iw * scale;
                             let dh = ih * scale;
-                            let ox = (f32::from(block_w) - dw) / 2.0;
-                            let oy = (MERMAID_HEIGHT - dh) / 2.0;
+                            let ox = (display_w - dw) / 2.0;
+                            let oy = (display_h - dh) / 2.0;
                             let paint_bounds = Bounds::new(
                                 point(left + px(ox), top_screen + px(oy)),
                                 size(px(dw), px(dh)),
                             );
                             let _ = window.paint_image(paint_bounds, gpui::Corners::default(), ri, 0, false);
                         }
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: 0,
+                            top_px: current_y,
+                            height_px: display_h,
+                            font_size_px,
+                            is_mermaid: true,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        current_y += display_h + PARA_GAP;
                     } else {
                         // Fallback placeholder when rendering failed.
+                        let display_h = MERMAID_HEIGHT_LOADING;
                         let mermaid_bounds = Bounds::new(
                             point(left, top_screen),
-                            size(block_w, px(MERMAID_HEIGHT)),
+                            size(block_w, px(display_h)),
                         );
                         window.paint_quad(fill(mermaid_bounds, theme.tokens.muted.opacity(0.3)));
                         let label_run = TextRun {
@@ -1969,24 +2037,24 @@ impl Element for DocumentEditorElement {
                             None,
                         );
                         let _ = shaped.paint(
-                            point(left, top_screen + px(MERMAID_HEIGHT / 2.0 - 8.0)),
+                            point(left, top_screen + px(display_h / 2.0 - 8.0)),
                             px(20.0),
                             window,
                             cx,
                         );
+                        visual_lines.push(VisualLine {
+                            para_idx,
+                            char_start: 0,
+                            char_end: 0,
+                            top_px: current_y,
+                            height_px: display_h,
+                            font_size_px,
+                            is_mermaid: true,
+                            glyph_xs: vec![],
+                        });
+                        line_layouts.push(None);
+                        current_y += display_h + PARA_GAP;
                     }
-                    visual_lines.push(VisualLine {
-                        para_idx,
-                        char_start: 0,
-                        char_end: 0,
-                        top_px: current_y,
-                        height_px: MERMAID_HEIGHT,
-                        font_size_px,
-                        is_mermaid: true,
-                        glyph_xs: vec![],
-                    });
-                    line_layouts.push(None);
-                    current_y += MERMAID_HEIGHT + PARA_GAP;
                     continue;
                 }
                 ParagraphKind::Image { path, height, .. } => {
