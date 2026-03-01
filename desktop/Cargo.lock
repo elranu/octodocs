@@ -3718,7 +3718,7 @@ dependencies = [
 
 [[package]]
 name = "octodocs-app"
-version = "0.1.9"
+version = "0.2.1"
 dependencies = [
  "adabraka-gpui",
  "adabraka-ui",

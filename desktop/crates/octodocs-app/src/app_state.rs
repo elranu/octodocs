@@ -307,8 +307,6 @@ impl AppState {
                 document = doc;
             }
         }
-        let blocks = Renderer::parse_blocks(&document.content);
-
         // Populate the word-style editor with the initial document.
         let paragraphs = markdown_to_doc_paragraphs(&document.content);
         let initial_doc_dir = document.path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
@@ -316,6 +314,11 @@ impl AppState {
             editor.document_dir = initial_doc_dir;
             editor.load_document(paragraphs, cx);
         });
+        // Normalize the baseline to what to_markdown() produces so that UI-only
+        // notifications (hover badge, zoom overlay) never create a spurious diff
+        // in the content observer and falsely mark the document as dirty.
+        document.content = doc_editor.read(cx).to_markdown();
+        let blocks = Renderer::parse_blocks(&document.content);
 
         let active_binding_idx = if github_bindings.is_empty() {
             None
@@ -581,6 +584,10 @@ impl AppState {
             self.full_editor_state.update(cx, |state, cx| state.set_content(&c, cx));
         }
         self.document = doc;
+        // Normalize: store the to_markdown() form as the dirty-check baseline so
+        // that UI-only state changes (hover badge, zoom overlay) that call
+        // cx.notify() on doc_editor never produce a false dirty flag.
+        self.document.content = self.doc_editor.read(cx).to_markdown();
         self.dirty = false;
         self.persist_ui_state_to_disk();
         cx.notify();

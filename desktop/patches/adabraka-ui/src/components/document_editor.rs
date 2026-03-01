@@ -154,6 +154,8 @@ pub struct DocumentEditorState {
     pub image_zoom: Option<PathBuf>,
     /// Index of the image paragraph the mouse is currently hovering over (for magnifier badge).
     pub hovered_image_para: Option<usize>,
+    /// Index of the mermaid paragraph the mouse is currently hovering over (for magnifier badge).
+    pub hovered_mermaid_para: Option<usize>,
 }
 
 impl DocumentEditorState {
@@ -173,6 +175,7 @@ impl DocumentEditorState {
             image_resize_drag: None,
             image_zoom: None,
             hovered_image_para: None,
+            hovered_mermaid_para: None,
         }
     }
 
@@ -191,6 +194,7 @@ impl DocumentEditorState {
         self.image_resize_drag = None;
         self.image_zoom = None;
         self.hovered_image_para = None;
+        self.hovered_mermaid_para = None;
         self.drag_occurred = false;
         self.table_cursor = None;
         // Evict image / mermaid decode caches when loading a new document so
@@ -1500,7 +1504,7 @@ thread_local! {
 /// Uses the same seed as preview_pane so both share the same /tmp PNG + .dims files.
 fn mermaid_source_hash(source: &str) -> u64 {
     let mut h = DefaultHasher::new();
-    "mermaid-cache-v5".hash(&mut h);
+    "mermaid-cache-v6".hash(&mut h);
     source.hash(&mut h);
     h.finish()
 }
@@ -2001,6 +2005,42 @@ impl Element for DocumentEditorElement {
                                 size(px(dw), px(dh)),
                             );
                             let _ = window.paint_image(paint_bounds, gpui::Corners::default(), ri, 0, false);
+                        }
+                        // Magnifier badge in top-right corner when hovered.
+                        let is_hovered = self.state.read(cx).hovered_mermaid_para == Some(para_idx);
+                        if is_hovered {
+                            let badge_size = 32.0_f32;
+                            let badge_x = left + block_w - px(badge_size + 8.0);
+                            let badge_y = top_screen + px(8.0);
+                            let badge_bounds = Bounds::new(
+                                point(badge_x, badge_y),
+                                size(px(badge_size), px(badge_size)),
+                            );
+                            window.paint_quad(gpui::PaintQuad {
+                                bounds: badge_bounds,
+                                corner_radii: gpui::Corners::all(px(badge_size / 2.0)),
+                                background: gpui::rgba(0x000000cc).into(),
+                                border_widths: gpui::Edges::all(px(0.0)),
+                                border_color: gpui::transparent_black(),
+                                border_style: gpui::BorderStyle::Solid,
+                                continuous_corners: false,
+                            });
+                            let icon = "\u{1f50d}"; // 🔍
+                            let icon_run = TextRun {
+                                len: icon.len(),
+                                font: base_font.clone(),
+                                color: gpui::white(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            let shaped = window.text_system().shape_line(
+                                icon.into(), px(16.0), &[icon_run], None,
+                            );
+                            let _ = shaped.paint(
+                                point(badge_x + px(8.0), badge_y + px(8.0)),
+                                px(24.0), window, cx,
+                            );
                         }
                         visual_lines.push(VisualLine {
                             para_idx,
@@ -2699,7 +2739,7 @@ impl RenderOnce for DocumentEditor {
                     return;
                 }
 
-                // Detect single click on the magnifier badge (top-right corner of image).
+                // Detect single click on the magnifier badge (top-right corner of image or mermaid).
                 {
                     let s = state.read(cx);
                     let block_w = bounds.size.width - px(LEFT_MARGIN * 2.0);
@@ -2707,15 +2747,16 @@ impl RenderOnce for DocumentEditor {
                     let badge_size = 32.0_f32;
                     for vl in &s.layout_cache {
                         let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
-                        if let ParagraphKind::Image { path, .. } = &para.kind {
-                            let top_screen = bounds.top() + px(vl.top_px);
-                            let badge_x = left + block_w - px(badge_size + 8.0);
-                            let badge_y = top_screen + px(8.0);
-                            let in_badge = event.position.x >= badge_x
-                                && event.position.x <= badge_x + px(badge_size)
-                                && event.position.y >= badge_y
-                                && event.position.y <= badge_y + px(badge_size);
-                            if in_badge {
+                        let top_screen = bounds.top() + px(vl.top_px);
+                        let badge_x = left + block_w - px(badge_size + 8.0);
+                        let badge_y = top_screen + px(8.0);
+                        let in_badge = event.position.x >= badge_x
+                            && event.position.x <= badge_x + px(badge_size)
+                            && event.position.y >= badge_y
+                            && event.position.y <= badge_y + px(badge_size);
+                        if !in_badge { continue; }
+                        match &para.kind {
+                            ParagraphKind::Image { path, .. } => {
                                 if let Some(ref dir) = s.document_dir {
                                     let img_path = dir.join(path.as_str());
                                     let _ = s;
@@ -2726,29 +2767,60 @@ impl RenderOnce for DocumentEditor {
                                     window.focus(&focus);
                                     return;
                                 }
-                                break;
                             }
+                            ParagraphKind::Mermaid(_) => {
+                                let source = para.plain_text();
+                                let key = mermaid_source_hash(&source);
+                                let png_path = std::env::temp_dir()
+                                    .join("octodocs-mermaid-cache")
+                                    .join(format!("{key}.png"));
+                                if png_path.exists() {
+                                    let _ = s;
+                                    state.update(cx, |st, cx| {
+                                        st.image_zoom = Some(png_path);
+                                        cx.notify();
+                                    });
+                                    window.focus(&focus);
+                                    return;
+                                }
+                            }
+                            _ => {}
                         }
+                        break;
                     }
                 }
 
-                // Detect double-click on an image block → show full-size zoom overlay.
+                // Detect double-click on an image or mermaid block → show full-size zoom overlay.
                 if event.click_count >= 2 {
                     let zoom_path: Option<PathBuf> = {
                         let s = state.read(cx);
                         let mut found = None;
                         for vl in &s.layout_cache {
                             let Some(para) = s.paragraphs.get(vl.para_idx) else { continue; };
-                            if let ParagraphKind::Image { path, .. } = &para.kind {
-                                let block_top = bounds.top() + px(vl.top_px);
-                                let block_bottom = block_top + px(vl.height_px);
-                                if event.position.y >= block_top && event.position.y <= block_bottom {
+                            let block_top = bounds.top() + px(vl.top_px);
+                            let block_bottom = block_top + px(vl.height_px);
+                            if event.position.y < block_top || event.position.y > block_bottom {
+                                continue;
+                            }
+                            match &para.kind {
+                                ParagraphKind::Image { path, .. } => {
                                     if let Some(ref dir) = s.document_dir {
                                         found = Some(dir.join(path));
                                     }
-                                    break;
                                 }
+                                ParagraphKind::Mermaid(_) => {
+                                    let source = para.plain_text();
+                                    let key = mermaid_source_hash(&source);
+                                    let png_path = std::env::temp_dir()
+                                        .join("octodocs-mermaid-cache")
+                                        .join(format!("{key}.png"));
+                                    if png_path.exists() {
+                                        found = Some(png_path);
+                                    }
+                                }
+                                _ => {}
                             }
+                            break;
                         }
                         found
                     };
@@ -2800,31 +2872,35 @@ impl RenderOnce for DocumentEditor {
                     return;
                 }
 
-                // Track which image block (if any) the cursor is hovering over.
+                // Track which image/mermaid block (if any) the cursor is hovering over.
                 {
-                    let new_hovered = {
+                    let (new_image_hovered, new_mermaid_hovered) = {
                         let s = state_move.read(cx);
                         let b = s.last_bounds.unwrap_or_default();
-                        let mut found = None;
+                        let mut img_found = None;
+                        let mut mer_found = None;
                         for vl in &s.layout_cache {
-                            if s.paragraphs.get(vl.para_idx)
-                                .map(|p| matches!(p.kind, ParagraphKind::Image { .. }))
-                                .unwrap_or(false)
-                            {
-                                let top = b.top() + px(vl.top_px);
-                                let bot = top + px(vl.height_px);
-                                if event.position.y >= top && event.position.y <= bot {
-                                    found = Some(vl.para_idx);
-                                    break;
+                            let top = b.top() + px(vl.top_px);
+                            let bot = top + px(vl.height_px);
+                            if event.position.y < top || event.position.y > bot { continue; }
+                            if let Some(para) = s.paragraphs.get(vl.para_idx) {
+                                match &para.kind {
+                                    ParagraphKind::Image { .. } => { img_found = Some(vl.para_idx); break; }
+                                    ParagraphKind::Mermaid(_) => { mer_found = Some(vl.para_idx); break; }
+                                    _ => {}
                                 }
                             }
                         }
-                        found
+                        (img_found, mer_found)
                     };
-                    let prev = state_move.read(cx).hovered_image_para;
-                    if prev != new_hovered {
+                    let (prev_img, prev_mer) = {
+                        let s = state_move.read(cx);
+                        (s.hovered_image_para, s.hovered_mermaid_para)
+                    };
+                    if prev_img != new_image_hovered || prev_mer != new_mermaid_hovered {
                         state_move.update(cx, |s, cx| {
-                            s.hovered_image_para = new_hovered;
+                            s.hovered_image_para = new_image_hovered;
+                            s.hovered_mermaid_para = new_mermaid_hovered;
                             cx.notify();
                         });
                         // Only short-circuit when not dragging text; during a drag,

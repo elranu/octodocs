@@ -340,7 +340,7 @@ fn render_mermaid_fallback(
 /// On cache hit the `.dims` sidecar is read so we avoid re-rendering.
 fn ensure_mermaid_png_path(source: &str) -> anyhow::Result<(PathBuf, f32, f32)> {
     let mut hasher = DefaultHasher::new();
-    "mermaid-cache-v5".hash(&mut hasher);
+    "mermaid-cache-v6".hash(&mut hasher);
     source.hash(&mut hasher);
     let hash = hasher.finish();
 
