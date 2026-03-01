@@ -16,6 +16,8 @@ jobs:
   build-linux:
     name: Build · Linux x86_64
     runs-on: ubuntu-latest
+    env:
+      OCTODOCS_GITHUB_CLIENT_ID: ${{ vars.OCTODOCS_GITHUB_CLIENT_ID }}
     defaults:
       run:
         working-directory: desktop
@@ -74,6 +76,8 @@ jobs:
     name: Build · macOS aarch64
     runs-on: macos-latest
     continue-on-error: true
+    env:
+      OCTODOCS_GITHUB_CLIENT_ID: ${{ vars.OCTODOCS_GITHUB_CLIENT_ID }}
     defaults:
       run:
         working-directory: desktop
@@ -154,6 +158,8 @@ jobs:
     name: Build · Windows x86_64
     runs-on: windows-2022
     continue-on-error: true
+    env:
+      OCTODOCS_GITHUB_CLIENT_ID: ${{ vars.OCTODOCS_GITHUB_CLIENT_ID }}
     defaults:
       run:
         shell: pwsh
