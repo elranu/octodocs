@@ -49,6 +49,8 @@ actions!(
         Copy,
         Cut,
         Paste,
+        Undo,
+        Redo,
     ]
 );
 
@@ -96,6 +98,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some("DocumentEditor")),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-v", Paste, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-z", Undo, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-z", Undo, Some("DocumentEditor")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-z", Redo, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-y", Redo, Some("DocumentEditor")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-z", Redo, Some("DocumentEditor")),
     ]);
 }
 
@@ -173,6 +185,18 @@ pub struct DocumentEditorState {
     pub image_cache: Arc<RwLock<HashMap<String, Arc<RenderImage>>>>,
     /// In-flight decode keys so we don't spawn duplicate tasks.
     pub pending_images: HashSet<String>,
+    /// Undo/redo history: each entry is a full paragraph snapshot.
+    pub history: Vec<Vec<DocParagraph>>,
+    /// Index into `history` that represents the current (most-recent) saved state.
+    pub history_idx: usize,
+    /// True when the last edit was a plain character insert (used to batch
+    /// consecutive typing into one undo step until a word boundary is hit).
+    pub last_edit_was_typing: bool,
+    /// When true the paint pass will scroll the view to make the cursor visible.
+    pub scroll_to_cursor: bool,
+    /// Shared scroll handle from the parent [`Scrollable`] container so the
+    /// editor can auto-scroll the viewport to follow the cursor.
+    pub scroll_handle: ScrollHandle,
 }
 
 impl DocumentEditorState {
@@ -198,6 +222,11 @@ impl DocumentEditorState {
             navigate_request: None,
             image_cache: Arc::new(RwLock::new(HashMap::new())),
             pending_images: HashSet::new(),
+            history: Vec::new(),
+            history_idx: 0,
+            last_edit_was_typing: false,
+            scroll_to_cursor: false,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -218,6 +247,10 @@ impl DocumentEditorState {
         self.table_cursor = None;
         self.image_cache = Arc::new(RwLock::new(HashMap::new()));
         self.pending_images.clear();
+        self.history.clear();
+        self.history_idx = 0;
+        self.last_edit_was_typing = false;
+        self.scroll_to_cursor = false;
         IMAGE_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_CACHE.with(|cache| cache.borrow_mut().clear());
         MERMAID_DIMS_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -228,6 +261,56 @@ impl DocumentEditorState {
         self.reset_transient_state();
     }
 
+    /// Push the current paragraph state onto the undo history.
+    /// Called **before** a mutation so the caller can restore the pre-edit state via Undo.
+    /// Truncates any redo entries above the current index.
+    fn push_undo_checkpoint(&mut self) {
+        const MAX_HISTORY: usize = 200;
+        // Truncate redo stack (anything above the current position)
+        if self.history_idx + 1 < self.history.len() {
+            self.history.truncate(self.history_idx + 1);
+        }
+        // Don't push if state is identical to the most-recent entry
+        if self.history.last().map(|h| h == &self.paragraphs).unwrap_or(false) {
+            return;
+        }
+        self.history.push(self.paragraphs.clone());
+        // Enforce max size
+        if self.history.len() > MAX_HISTORY {
+            self.history.remove(0);
+        }
+        self.history_idx = self.history.len().saturating_sub(1);
+    }
+
+    pub fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.history_idx > 0 {
+            self.history_idx -= 1;
+            self.paragraphs = self.history[self.history_idx].clone();
+            self.selection = None;
+            self.last_edit_was_typing = false;
+            self.scroll_to_cursor = true;
+            cx.notify();
+        } else if !self.history.is_empty() {
+            // Restore the very first snapshot (initial load state)
+            self.paragraphs = self.history[0].clone();
+            self.selection = None;
+            self.last_edit_was_typing = false;
+            self.scroll_to_cursor = true;
+            cx.notify();
+        }
+    }
+
+    pub fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.history_idx + 1 < self.history.len() {
+            self.history_idx += 1;
+            self.paragraphs = self.history[self.history_idx].clone();
+            self.selection = None;
+            self.last_edit_was_typing = false;
+            self.scroll_to_cursor = true;
+            cx.notify();
+        }
+    }
+
     /// Replace the document content. Cursor resets to the beginning.
     pub fn load_document(&mut self, paragraphs: Vec<DocParagraph>, cx: &mut Context<Self>) {
         self.paragraphs = if paragraphs.is_empty() {
@@ -236,6 +319,10 @@ impl DocumentEditorState {
             paragraphs
         };
         self.reset_transient_state();
+        // Seed undo history with the initial loaded state so the user can
+        // undo back to the version that was loaded from disk.
+        self.history = vec![self.paragraphs.clone()];
+        self.history_idx = 0;
         // Spawn background decode for every image paragraph so paint never blocks.
         let doc_dir = self.document_dir.clone();
         for para in &self.paragraphs {
@@ -675,6 +762,7 @@ impl DocumentEditorState {
             self.cursor.para_idx -= 1;
             self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -690,6 +778,7 @@ impl DocumentEditorState {
                 self.cursor.char_offset = 0;
             }
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -711,6 +800,7 @@ impl DocumentEditorState {
             self.cursor.para_idx -= 1;
             self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -732,6 +822,7 @@ impl DocumentEditorState {
             self.cursor.para_idx += 1;
             self.cursor.char_offset = 0;
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -742,6 +833,7 @@ impl DocumentEditorState {
         } else {
             self.cursor.char_offset = 0;
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -752,12 +844,14 @@ impl DocumentEditorState {
         } else {
             self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
     pub fn move_to_doc_start(&mut self, _: &MoveToDocStart, _: &mut Window, cx: &mut Context<Self>) {
         self.selection = None;
         self.cursor = DocCursor::zero();
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -765,6 +859,7 @@ impl DocumentEditorState {
         self.selection = None;
         let last = self.num_paras() - 1;
         self.cursor = DocCursor { para_idx: last, char_offset: self.para_char_count(last) };
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -791,6 +886,7 @@ impl DocumentEditorState {
             self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
         }
         self.extend_sel();
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -823,6 +919,7 @@ impl DocumentEditorState {
             }
         }
         self.extend_sel();
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -842,6 +939,7 @@ impl DocumentEditorState {
             }
         }
         self.extend_sel();
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -853,6 +951,7 @@ impl DocumentEditorState {
             self.cursor.char_offset = 0;
         }
         self.extend_sel();
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -864,6 +963,7 @@ impl DocumentEditorState {
             self.cursor.char_offset = self.para_char_count(self.cursor.para_idx);
         }
         self.extend_sel();
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -872,6 +972,7 @@ impl DocumentEditorState {
         let end = DocCursor { para_idx: last, char_offset: self.para_char_count(last) };
         self.selection = Some(DocSelection { anchor: DocCursor::zero(), focus: end });
         self.cursor = end;
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -974,10 +1075,13 @@ impl DocumentEditorState {
         } else {
             self.cursor = self.do_insert(self.cursor, text);
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
     pub fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         // ── Table cell backspace ───────────────────────────────────────────────
         if let Some((tr, tc)) = self.table_cursor {
             let para_idx = self.cursor.para_idx;
@@ -1025,10 +1129,13 @@ impl DocumentEditorState {
             self.paragraphs.remove(self.cursor.para_idx);
             self.cursor = DocCursor { para_idx: prev_idx, char_offset: prev_len };
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
     pub fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         if self.selection.is_some() {
             let at = self.delete_selection(cx);
             self.cursor = at;
@@ -1047,15 +1154,20 @@ impl DocumentEditorState {
             self.paragraphs[self.cursor.para_idx].spans = merged;
             self.paragraphs.remove(self.cursor.para_idx + 1);
         }
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
     pub fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         self.insert_text("\n", cx);
     }
 
     /// Shift+Enter: always insert a plain paragraph break, exiting any list context.
     pub fn shift_enter(&mut self, _: &ShiftEnter, _: &mut Window, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let cur_para_idx = self.cursor.para_idx;
         if let Some(_) = self.selection {
             let at = self.delete_selection(cx);
@@ -1069,6 +1181,7 @@ impl DocumentEditorState {
             spans: tail,
         });
         self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -1126,6 +1239,8 @@ impl DocumentEditorState {
             return;
         }
         // ────────────────────────────────────────────────────────────────────────
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         self.insert_text("    ", cx);
     }
 
@@ -1139,15 +1254,20 @@ impl DocumentEditorState {
     pub fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         let text = self.selected_text();
         if !text.is_empty() {
+            self.push_undo_checkpoint();
+            self.last_edit_was_typing = false;
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             let at = self.delete_selection(cx);
             self.cursor = at;
+            self.scroll_to_cursor = true;
             cx.notify();
         }
     }
 
     pub fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
+            self.push_undo_checkpoint();
+            self.last_edit_was_typing = false;
             // Check for an image in the clipboard first.
             for entry in item.entries() {
                 if let ClipboardEntry::Image(img) = entry {
@@ -1215,6 +1335,8 @@ impl DocumentEditorState {
 
     /// Toggle the current paragraph between `TaskListItem { checked: false }` and `Paragraph`.
     pub fn toggle_task_list_item(&mut self, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let para = &mut self.paragraphs[self.cursor.para_idx];
         para.kind = match &para.kind {
             ParagraphKind::TaskListItem { .. } => ParagraphKind::Paragraph,
@@ -1225,6 +1347,8 @@ impl DocumentEditorState {
 
     /// Toggle the current paragraph between `UnorderedListItem` and `Paragraph`.
     pub fn toggle_unordered_list(&mut self, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let para = &mut self.paragraphs[self.cursor.para_idx];
         para.kind = match &para.kind {
             ParagraphKind::UnorderedListItem => ParagraphKind::Paragraph,
@@ -1236,6 +1360,8 @@ impl DocumentEditorState {
     /// Toggle the current paragraph between `OrderedListItem` and `Paragraph`.
     /// The order number is computed from adjacent ordered list items.
     pub fn toggle_ordered_list(&mut self, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let para_idx = self.cursor.para_idx;
         // Compute prev_order before taking any mutable borrow.
         let prev_order = if para_idx > 0 {
@@ -1262,6 +1388,8 @@ impl DocumentEditorState {
 
     /// Insert an image paragraph after the current cursor position.
     pub fn insert_image_at_cursor(&mut self, path: String, alt: String, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let para = DocParagraph {
             kind: ParagraphKind::Image { path: path.clone(), alt, height: IMAGE_BLOCK_DEFAULT_HEIGHT },
             spans: vec![InlineSpan { text: String::new(), format: InlineFormat::Plain, link_url: None }],
@@ -1324,6 +1452,8 @@ impl DocumentEditorState {
     }
 
     fn toggle_format(&mut self, fmt: InlineFormat, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let Some(sel) = self.selection else {
             // No text selected — do nothing.
             return;
@@ -1413,12 +1543,16 @@ impl DocumentEditorState {
 
     /// Change the block type of the current paragraph.
     pub fn set_paragraph_kind(&mut self, kind: ParagraphKind, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         self.paragraphs[self.cursor.para_idx].kind = kind;
         cx.notify();
     }
 
     /// Insert a blank 3-column / 2-row GFM table after the current paragraph.
     pub fn insert_table(&mut self, cx: &mut Context<Self>) {
+        self.push_undo_checkpoint();
+        self.last_edit_was_typing = false;
         let source = "| Column 1 | Column 2 | Column 3 |\n| --- | --- | --- |\n| Cell | Cell | Cell |\n| Cell | Cell | Cell |\n".to_string();
         let headers = vec!["Column 1".to_string(), "Column 2".to_string(), "Column 3".to_string()];
         let rows = vec![
@@ -1793,6 +1927,7 @@ impl EntityInputHandler for DocumentEditorState {
         }
 
         self.marked_range = None;
+        self.scroll_to_cursor = true;
         cx.notify();
     }
 
@@ -2420,6 +2555,8 @@ impl Element for DocumentEditorElement {
             doc_dir,
             hovered_image_para,
             hovered_mermaid_para,
+            scroll_to_cursor,
+            scroll_handle,
         ) = {
             let s = self.state.read(cx);
             (
@@ -2431,6 +2568,8 @@ impl Element for DocumentEditorElement {
                 s.document_dir.clone(),
                 s.hovered_image_para,
                 s.hovered_mermaid_para,
+                s.scroll_to_cursor,
+                s.scroll_handle.clone(),
             )
         };
 
@@ -3382,6 +3521,31 @@ impl Element for DocumentEditorElement {
                     caret_color,
                 ));
                 } // end table guard
+
+                // ── Auto-scroll to keep cursor in view ────────────────────────
+                if scroll_to_cursor {
+                    let scroll_offset_y = f32::from(scroll_handle.offset().y);
+                    // Screen Y of the scroll container's top edge
+                    let container_top_abs = f32::from(bounds.top()) - scroll_offset_y;
+                    let container_h = f32::from(viewport.height);
+                    let cursor_screen_top = f32::from(bounds.top()) + vl.top_px;
+                    let cursor_screen_bottom = cursor_screen_top + vl.height_px;
+                    const SCROLL_MARGIN: f32 = 80.0;
+                    let visible_top = container_top_abs + SCROLL_MARGIN;
+                    let visible_bottom = container_top_abs + container_h - SCROLL_MARGIN;
+                    let new_offset_y = if cursor_screen_bottom > visible_bottom {
+                        scroll_offset_y - (cursor_screen_bottom - visible_bottom)
+                    } else if cursor_screen_top < visible_top {
+                        scroll_offset_y + (visible_top - cursor_screen_top)
+                    } else {
+                        scroll_offset_y
+                    };
+                    if (new_offset_y - scroll_offset_y).abs() > 0.5 {
+                        scroll_handle.set_offset(point(px(0.0), px(new_offset_y)));
+                    }
+                    // Reset flag — no cx.notify() so no extra re-render triggered
+                    self.state.update(cx, |s, _| { s.scroll_to_cursor = false; });
+                }
             }
         }
     }
@@ -3449,6 +3613,8 @@ impl RenderOnce for DocumentEditor {
             .on_action(window.listener_for(&self.state, DocumentEditorState::copy))
             .on_action(window.listener_for(&self.state, DocumentEditorState::cut))
             .on_action(window.listener_for(&self.state, DocumentEditorState::paste))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::undo))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::redo))
             .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
                 let bounds = state.read(cx).last_bounds.unwrap_or_default();
                 let new_cursor = state.read(cx).cursor_from_point(event.position, bounds);

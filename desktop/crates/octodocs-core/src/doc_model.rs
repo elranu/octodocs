@@ -13,7 +13,7 @@ use crate::renderer::{Inline, RenderNode, Renderer};
 // ─────────────────────────────────────────────────────────────
 
 /// A single top-level block in the rich editor model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DocParagraph {
     pub kind: ParagraphKind,
     pub spans: Vec<InlineSpan>,
@@ -48,7 +48,7 @@ pub enum ParagraphKind {
 }
 
 /// A run of text with a single inline format.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InlineSpan {
     pub text: String,
     pub format: InlineFormat,

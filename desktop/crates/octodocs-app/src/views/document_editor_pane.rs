@@ -24,11 +24,15 @@ impl Render for DocumentEditorPane {
         let zoom_path = editor_state.read(cx).image_zoom.clone();
         let close_weak = editor_state.downgrade();
 
+        // Share the scroll handle between the editor state and the scrollable
+        // container so the editor can programmatically scroll to keep the cursor visible.
+        let scroll_handle = editor_state.read(cx).scroll_handle.clone();
+
         let editor_scroll = scrollable_vertical(
             div()
                 .size_full()
                 .child(DocumentEditor::new(&editor_state)),
-        );
+        ).with_scroll_handle(scroll_handle);
 
         let mut root = div().relative().size_full().child(editor_scroll);
 
