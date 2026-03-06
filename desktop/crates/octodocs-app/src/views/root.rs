@@ -796,32 +796,21 @@ impl Render for RootView {
                     ),
             );
 
-        // Window control buttons (minimize / maximize / close) shown on the right
-        // of the toolbar. These replace the native title-bar buttons that disappear
-        // when the compositor uses client-side decorations.
+        // Window control buttons (maximize / close) shown on the right of the
+        // toolbar. These replace the native title-bar buttons that disappear when
+        // the compositor uses client-side decorations.
+        //
+        // NOTE: Minimize is intentionally omitted on Linux/Wayland. On GNOME
+        // Wayland, xdg_toplevel.set_minimized() hides the window with no taskbar
+        // entry to recover from — the window effectively disappears until the user
+        // opens the Activities overlay (Super key). Omitting the button avoids
+        // that UX trap. On macOS/Windows the native title bar provides minimize.
         let wc_size = px(32.0);
         let wc_icon = px(14.0);
         let muted_bg = theme.tokens.muted;
         let destructive_bg = theme.tokens.destructive;
         let fg_color = theme.tokens.foreground;
         let radius = theme.tokens.radius_sm;
-
-        let minimize_btn = div()
-            .size(wc_size)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(radius)
-            .cursor_pointer()
-            .hover(move |s| s.bg(muted_bg))
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _cx| {
-                window.minimize_window();
-            })
-            .child(
-                Icon::new(IconSource::Named("minus".into()))
-                    .size(wc_icon)
-                    .color(fg_color),
-            );
 
         let maximize_btn = div()
             .size(wc_size)
@@ -881,7 +870,6 @@ impl Render for RootView {
                     .flex()
                     .items_center()
                     .gap(px(2.0))
-                    .child(minimize_btn)
                     .child(maximize_btn)
                     .child(close_btn),
             );
