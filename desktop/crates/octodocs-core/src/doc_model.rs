@@ -31,6 +31,10 @@ pub enum ParagraphKind {
     Mermaid(PathBuf),
     /// A GFM task list item. `checked` reflects the `[ ]`/`[x]` state.
     TaskListItem { checked: bool },
+    /// An unordered (bullet) list item.
+    UnorderedListItem,
+    /// An ordered (numbered) list item. `order` is the 1-based item number.
+    OrderedListItem { order: u32 },
     /// An inline image. `path` is the relative URL (e.g. `images/photo.png`).
     /// `height` is the display height in pixels (default 300; stored in markdown title).
     Image { path: String, alt: String, height: f32 },
@@ -318,6 +322,14 @@ fn render_node_to_doc_paragraphs(node: &RenderNode) -> Vec<DocParagraph> {
             let spans = inlines_to_spans(inlines);
             vec![DocParagraph { kind: ParagraphKind::TaskListItem { checked: *checked }, spans }]
         }
+        RenderNode::UnorderedListItem { inlines } => {
+            let spans = inlines_to_spans(inlines);
+            vec![DocParagraph { kind: ParagraphKind::UnorderedListItem, spans }]
+        }
+        RenderNode::OrderedListItem { order, inlines } => {
+            let spans = inlines_to_spans(inlines);
+            vec![DocParagraph { kind: ParagraphKind::OrderedListItem { order: *order }, spans }]
+        }
         RenderNode::BlockQuote(nodes) => {
             let inner_spans: Vec<InlineSpan> = nodes
                 .iter()
@@ -447,8 +459,17 @@ fn spans_to_markdown(spans: &[InlineSpan]) -> String {
 
 /// Serialise a slice of `DocParagraph`s to Markdown.
 pub fn doc_paragraphs_to_markdown(paragraphs: &[DocParagraph]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for para in paragraphs {
+    fn is_list_item(kind: &ParagraphKind) -> bool {
+        matches!(
+            kind,
+            ParagraphKind::TaskListItem { .. }
+                | ParagraphKind::UnorderedListItem
+                | ParagraphKind::OrderedListItem { .. }
+        )
+    }
+
+    let mut result = String::new();
+    for (i, para) in paragraphs.iter().enumerate() {
         let block = match &para.kind {
             ParagraphKind::Paragraph => {
                 spans_to_markdown(&para.spans)
@@ -478,19 +499,36 @@ pub fn doc_paragraphs_to_markdown(paragraphs: &[DocParagraph]) -> String {
                 let marker = if *checked { "- [x] " } else { "- [ ] " };
                 format!("{}{}", marker, spans_to_markdown(&para.spans))
             }
+            ParagraphKind::UnorderedListItem => {
+                format!("- {}", spans_to_markdown(&para.spans))
+            }
+            ParagraphKind::OrderedListItem { order } => {
+                format!("{order}. {}", spans_to_markdown(&para.spans))
+            }
             ParagraphKind::Image { path, alt, height } => {
                 // Only store height in title when it differs from the default (300px).
                 if (*height - 300.0).abs() < 1.0 {
                     format!("![{alt}]({path})")
                 } else {
-                    format!("![{alt}]({path} \"{height:.0}\")")  
+                    format!("![{alt}]({path} \"{height:.0}\")")
                 }
             }
             ParagraphKind::Table { source, .. } => source.clone(),
         };
-        parts.push(block);
+
+        if i > 0 {
+            // Use a single newline between consecutive list items (tight list),
+            // and a blank line between all other block pairs.
+            let prev_kind = &paragraphs[i - 1].kind;
+            let cur_kind = &para.kind;
+            if is_list_item(prev_kind) && is_list_item(cur_kind) {
+                result.push('\n');
+            } else {
+                result.push_str("\n\n");
+            }
+        }
+        result.push_str(&block);
     }
-    let mut result = parts.join("\n\n");
     if !result.is_empty() {
         result.push('\n');
     }

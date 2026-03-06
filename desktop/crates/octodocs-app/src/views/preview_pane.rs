@@ -209,6 +209,34 @@ pub fn render_node(node: &RenderNode, theme: &adabraka_ui::theme::Theme, doc_dir
                 .into_any_element()
         }
 
+        RenderNode::UnorderedListItem { inlines } => {
+            let spans: Vec<AnyElement> = inlines
+                .iter()
+                .map(|inline| render_inline(inline, theme))
+                .collect();
+            div()
+                .flex()
+                .gap(px(8.0))
+                .my(px(2.0))
+                .child(body_small("•".to_string()))
+                .children(spans)
+                .into_any_element()
+        }
+
+        RenderNode::OrderedListItem { order, inlines } => {
+            let spans: Vec<AnyElement> = inlines
+                .iter()
+                .map(|inline| render_inline(inline, theme))
+                .collect();
+            div()
+                .flex()
+                .gap(px(8.0))
+                .my(px(2.0))
+                .child(body_small(format!("{}.", order)))
+                .children(spans)
+                .into_any_element()
+        }
+
         RenderNode::Table { headers, rows } => {
             let col_count = headers.len().max(1);
 

@@ -42,6 +42,10 @@ pub enum RenderNode {
     List { ordered: bool, items: Vec<Vec<RenderNode>> },
     /// A GFM task list item (`- [ ]` or `- [x]`).
     TaskListItem { checked: bool, inlines: Vec<Inline> },
+    /// An unordered (bullet) list item.
+    UnorderedListItem { inlines: Vec<Inline> },
+    /// An ordered (numbered) list item.
+    OrderedListItem { order: u32, inlines: Vec<Inline> },
     /// A GFM table. `headers` is the header row; `rows` are the body rows.
     /// Each cell is a list of `Inline` nodes (may have bold/italic etc.).
     Table {
@@ -232,6 +236,8 @@ impl Renderer {
         // List / task list state
         let mut in_list_item = false;
         let mut task_list_checked: Option<bool> = None;
+        // Stack of (ordered, next_order) for nested lists.
+        let mut list_stack: Vec<(bool, u32)> = Vec::new();
         // Image state
         let mut in_image = false;
         let mut image_url = String::new();
@@ -310,6 +316,14 @@ impl Renderer {
                         if in_list_item {
                             if let Some(checked) = task_list_checked {
                                 nodes.push(RenderNode::TaskListItem { checked, inlines: inline_buf.clone() });
+                            } else if let Some(top) = list_stack.last_mut() {
+                                if top.0 {
+                                    let current_order = top.1;
+                                    nodes.push(RenderNode::OrderedListItem { order: current_order, inlines: inline_buf.clone() });
+                                    top.1 += 1;
+                                } else {
+                                    nodes.push(RenderNode::UnorderedListItem { inlines: inline_buf.clone() });
+                                }
                             } else {
                                 nodes.push(RenderNode::Paragraph(inline_buf.clone()));
                             }
@@ -361,6 +375,14 @@ impl Renderer {
                     if !inline_buf.is_empty() {
                         if let Some(checked) = task_list_checked {
                             nodes.push(RenderNode::TaskListItem { checked, inlines: inline_buf.clone() });
+                        } else if let Some(top) = list_stack.last_mut() {
+                            if top.0 {
+                                let current_order = top.1;
+                                nodes.push(RenderNode::OrderedListItem { order: current_order, inlines: inline_buf.clone() });
+                                top.1 += 1;
+                            } else {
+                                nodes.push(RenderNode::UnorderedListItem { inlines: inline_buf.clone() });
+                            }
                         } else {
                             nodes.push(RenderNode::Paragraph(inline_buf.clone()));
                         }
@@ -373,6 +395,16 @@ impl Renderer {
                     if in_list_item {
                         task_list_checked = Some(checked);
                     }
+                }
+
+                // ── Lists ────────────────────────────────────────
+                Event::Start(Tag::List(start)) => {
+                    let ordered = start.is_some();
+                    let first = start.unwrap_or(1) as u32;
+                    list_stack.push((ordered, first));
+                }
+                Event::End(TagEnd::List(_)) => {
+                    list_stack.pop();
                 }
 
                 // ── Code blocks ───────────────────────────────────

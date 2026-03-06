@@ -180,6 +180,20 @@ impl RootView {
         };
 
         let aw = app_weak.clone();
+        let unordered_list_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_unordered_list(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
+        let ordered_list_h = move |_w: &mut Window, cx: &mut App| {
+            let _ = aw.update(cx, |state, cx| {
+                state.doc_editor.update(cx, |editor, cx| editor.toggle_ordered_list(cx));
+            });
+        };
+
+        let aw = app_weak.clone();
         let insert_image_h = move |_w: &mut Window, cx: &mut App| {
             if let Some(src) = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"])
@@ -349,6 +363,16 @@ impl RootView {
                             ToolbarButton::new("checkbox", IconSource::Named("square-check".into()))
                                 .tooltip("Toggle Task List Item")
                                 .on_click(checkbox_h),
+                        )
+                        .button(
+                            ToolbarButton::new("unordered-list", IconSource::Named("list".into()))
+                                .tooltip("Toggle Bullet List")
+                                .on_click(unordered_list_h),
+                        )
+                        .button(
+                            ToolbarButton::new("ordered-list", IconSource::Named("list-ordered".into()))
+                                .tooltip("Toggle Numbered List")
+                                .on_click(ordered_list_h),
                         )
                         .button(
                             ToolbarButton::new("image", IconSource::Named("image".into()))
@@ -796,90 +820,12 @@ impl Render for RootView {
                     ),
             );
 
-        // Window control buttons (maximize / close) shown on the right of the
-        // toolbar. These replace the native title-bar buttons that disappear when
-        // the compositor uses client-side decorations.
-        //
-        // NOTE: Minimize is intentionally omitted on Linux/Wayland. On GNOME
-        // Wayland, xdg_toplevel.set_minimized() hides the window with no taskbar
-        // entry to recover from — the window effectively disappears until the user
-        // opens the Activities overlay (Super key). Omitting the button avoids
-        // that UX trap. On macOS/Windows the native title bar provides minimize.
-        let wc_size = px(32.0);
-        let wc_icon = px(14.0);
-        let muted_bg = theme.tokens.muted;
-        let destructive_bg = theme.tokens.destructive;
-        let fg_color = theme.tokens.foreground;
-        let radius = theme.tokens.radius_sm;
-
-        let maximize_btn = div()
-            .size(wc_size)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(radius)
-            .cursor_pointer()
-            .hover(move |s| s.bg(muted_bg))
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _cx| {
-                window.zoom_window();
-            })
-            .child(
-                Icon::new(IconSource::Named("maximize-2".into()))
-                    .size(wc_icon)
-                    .color(fg_color),
-            );
-
-        let app_weak_close = self.app_state.downgrade();
-        let close_btn = div()
-            .size(wc_size)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(radius)
-            .cursor_pointer()
-            .hover(move |s| s.bg(destructive_bg))
-            .on_mouse_down(gpui::MouseButton::Left, move |_, _window, cx| {
-                let _ = app_weak_close.update(cx, |state, cx| {
-                    if state.dirty {
-                        state.pending_window_close = true;
-                        state.show_unsaved_prompt = true;
-                        cx.notify();
-                    } else {
-                        cx.quit();
-                    }
-                });
-            })
-            .child(
-                Icon::new(IconSource::Named("x".into()))
-                    .size(wc_icon)
-                    .color(fg_color),
-            );
-
-        // Wrap the toolbar in a relative container so we can overlay the window
-        // controls on the right without disturbing the toolbar's own layout.
-        let toolbar_row = div()
-            .relative()
-            .w_full()
-            .child(self.toolbar.clone())
-            .child(
-                div()
-                    .absolute()
-                    .right(px(4.0))
-                    .top_0()
-                    .bottom_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(maximize_btn)
-                    .child(close_btn),
-            );
-
         div()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.tokens.background)
-            .child(toolbar_row)
+            .child(self.toolbar.clone())
             .when_some(update_available, |this, tag| {
                 let app_weak_dismiss = self.app_state.downgrade();
                 let app_weak_update = self.app_state.downgrade();

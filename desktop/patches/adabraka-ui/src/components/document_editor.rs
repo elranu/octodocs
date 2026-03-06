@@ -44,6 +44,7 @@ actions!(
         Backspace,
         Delete,
         Enter,
+        ShiftEnter,
         Tab,
         Copy,
         Cut,
@@ -81,6 +82,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("backspace", Backspace, Some("DocumentEditor")),
         KeyBinding::new("delete", Delete, Some("DocumentEditor")),
         KeyBinding::new("enter", Enter, Some("DocumentEditor")),
+        KeyBinding::new("shift-enter", ShiftEnter, Some("DocumentEditor")),
         KeyBinding::new("tab", Tab, Some("DocumentEditor")),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-c", Copy, Some("DocumentEditor")),
@@ -563,6 +565,7 @@ impl DocumentEditorState {
         if !matches!(
             self.paragraphs[para_idx].kind,
             ParagraphKind::Paragraph | ParagraphKind::Heading(_)
+                | ParagraphKind::UnorderedListItem | ParagraphKind::OrderedListItem { .. }
         ) {
             return;
         }
@@ -919,18 +922,55 @@ impl DocumentEditorState {
         }
 
         if text == "\n" {
-            // Enter: split paragraph at cursor
             let cur_para_idx = self.cursor.para_idx;
             let split_at = self.cursor.char_offset;
-            let (head, tail) =
-                Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
-            self.paragraphs[cur_para_idx].spans = head;
-            let new_para = DocParagraph {
-                kind: ParagraphKind::Paragraph,
-                spans: tail,
-            };
-            self.paragraphs.insert(cur_para_idx + 1, new_para);
-            self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+            let cur_kind = self.paragraphs[cur_para_idx].kind.clone();
+
+            // In a list item: empty item exits the list; non-empty item continues it.
+            match &cur_kind {
+                ParagraphKind::UnorderedListItem => {
+                    if self.paragraphs[cur_para_idx].plain_text().is_empty() {
+                        // Exit list: convert empty item to a plain paragraph.
+                        self.paragraphs[cur_para_idx].kind = ParagraphKind::Paragraph;
+                    } else {
+                        let (head, tail) = Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
+                        self.paragraphs[cur_para_idx].spans = head;
+                        self.paragraphs.insert(cur_para_idx + 1, DocParagraph {
+                            kind: ParagraphKind::UnorderedListItem,
+                            spans: tail,
+                        });
+                        self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+                    }
+                }
+                ParagraphKind::OrderedListItem { order } => {
+                    let order = *order;
+                    if self.paragraphs[cur_para_idx].plain_text().is_empty() {
+                        // Exit list: convert empty item to a plain paragraph.
+                        self.paragraphs[cur_para_idx].kind = ParagraphKind::Paragraph;
+                    } else {
+                        let (head, tail) = Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
+                        self.paragraphs[cur_para_idx].spans = head;
+                        let new_order = order + 1;
+                        self.paragraphs.insert(cur_para_idx + 1, DocParagraph {
+                            kind: ParagraphKind::OrderedListItem { order: new_order },
+                            spans: tail,
+                        });
+                        self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+                        // Re-number any subsequent ordered list items to keep sequence.
+                        self.renumber_ordered_list_from(cur_para_idx + 1);
+                    }
+                }
+                _ => {
+                    // Default: plain paragraph split
+                    let (head, tail) = Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
+                    self.paragraphs[cur_para_idx].spans = head;
+                    self.paragraphs.insert(cur_para_idx + 1, DocParagraph {
+                        kind: ParagraphKind::Paragraph,
+                        spans: tail,
+                    });
+                    self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+                }
+            }
         } else {
             self.cursor = self.do_insert(self.cursor, text);
         }
@@ -1012,6 +1052,46 @@ impl DocumentEditorState {
 
     pub fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         self.insert_text("\n", cx);
+    }
+
+    /// Shift+Enter: always insert a plain paragraph break, exiting any list context.
+    pub fn shift_enter(&mut self, _: &ShiftEnter, _: &mut Window, cx: &mut Context<Self>) {
+        let cur_para_idx = self.cursor.para_idx;
+        if let Some(_) = self.selection {
+            let at = self.delete_selection(cx);
+            self.cursor = at;
+        }
+        let split_at = self.cursor.char_offset;
+        let (head, tail) = Self::split_spans_at_char(&self.paragraphs[cur_para_idx].spans, split_at);
+        self.paragraphs[cur_para_idx].spans = head;
+        self.paragraphs.insert(cur_para_idx + 1, DocParagraph {
+            kind: ParagraphKind::Paragraph,
+            spans: tail,
+        });
+        self.cursor = DocCursor { para_idx: cur_para_idx + 1, char_offset: 0 };
+        cx.notify();
+    }
+
+    /// Re-number consecutive `OrderedListItem` paragraphs starting at `from_idx`,
+    /// continuing the sequence from the item just before `from_idx`.
+    fn renumber_ordered_list_from(&mut self, from_idx: usize) {
+        if from_idx >= self.paragraphs.len() {
+            return;
+        }
+        // Get the order of the item just inserted before from_idx.
+        let mut next_order = match &self.paragraphs[from_idx].kind {
+            ParagraphKind::OrderedListItem { order } => *order + 1,
+            _ => return,
+        };
+        // Walk forward renumbering consecutive ordered items.
+        for i in (from_idx + 1)..self.paragraphs.len() {
+            if let ParagraphKind::OrderedListItem { order } = &mut self.paragraphs[i].kind {
+                *order = next_order;
+                next_order += 1;
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1140,6 +1220,43 @@ impl DocumentEditorState {
             ParagraphKind::TaskListItem { .. } => ParagraphKind::Paragraph,
             _ => ParagraphKind::TaskListItem { checked: false },
         };
+        cx.notify();
+    }
+
+    /// Toggle the current paragraph between `UnorderedListItem` and `Paragraph`.
+    pub fn toggle_unordered_list(&mut self, cx: &mut Context<Self>) {
+        let para = &mut self.paragraphs[self.cursor.para_idx];
+        para.kind = match &para.kind {
+            ParagraphKind::UnorderedListItem => ParagraphKind::Paragraph,
+            _ => ParagraphKind::UnorderedListItem,
+        };
+        cx.notify();
+    }
+
+    /// Toggle the current paragraph between `OrderedListItem` and `Paragraph`.
+    /// The order number is computed from adjacent ordered list items.
+    pub fn toggle_ordered_list(&mut self, cx: &mut Context<Self>) {
+        let para_idx = self.cursor.para_idx;
+        // Compute prev_order before taking any mutable borrow.
+        let prev_order = if para_idx > 0 {
+            match &self.paragraphs[para_idx - 1].kind {
+                ParagraphKind::OrderedListItem { order } => *order + 1,
+                _ => 1,
+            }
+        } else {
+            1
+        };
+        let was_list = matches!(&self.paragraphs[para_idx].kind, ParagraphKind::OrderedListItem { .. });
+        let para = &mut self.paragraphs[para_idx];
+        para.kind = if was_list {
+            ParagraphKind::Paragraph
+        } else {
+            ParagraphKind::OrderedListItem { order: prev_order }
+        };
+        // Re-number trailing ordered items after this one when toggling ON.
+        if !was_list {
+            self.renumber_ordered_list_from(para_idx);
+        }
         cx.notify();
     }
 
@@ -2980,6 +3097,41 @@ impl Element for DocumentEditorElement {
                 }
             }
 
+            // Unordered list item — filled bullet circle in left margin
+            if let ParagraphKind::UnorderedListItem = kind {
+                let dot_size = px(6.0);
+                let dot_x = left - px(20.0);
+                let dot_y = bounds.top() + px(current_y + (line_height - 6.0) / 2.0);
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: Bounds::new(point(dot_x, dot_y), size(dot_size, dot_size)),
+                    corner_radii: gpui::Corners::all(dot_size / 2.0),
+                    background: theme.tokens.foreground.into(),
+                    border_widths: gpui::Edges::all(px(0.0)),
+                    border_color: gpui::Hsla::transparent_black(),
+                    border_style: gpui::BorderStyle::Solid,
+                    continuous_corners: false,
+                });
+            }
+
+            // Ordered list item — render "N." label in left margin
+            if let ParagraphKind::OrderedListItem { order } = kind {
+                let label = format!("{}.", order);
+                let font_size = px(font_size_px);
+                let run = TextRun {
+                    len: label.len(),
+                    font: base_font.clone(),
+                    color: theme.tokens.muted_foreground,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped = window.text_system().shape_line(label.clone().into(), font_size, &[run], None);
+                // Position the number label flush right against the LEFT_MARGIN edge.
+                let label_x = left - px(28.0);
+                let label_y = bounds.top() + px(current_y);
+                let _ = shaped.paint(point(label_x, label_y), px(line_height), window, cx);
+            }
+
             // Split paragraph text at '\n' to get visual sub-lines, then
             // word-wrap each sub-line to fit within block_w.
             let flat = para.plain_text();
@@ -3292,6 +3444,7 @@ impl RenderOnce for DocumentEditor {
             .on_action(window.listener_for(&self.state, DocumentEditorState::backspace))
             .on_action(window.listener_for(&self.state, DocumentEditorState::delete))
             .on_action(window.listener_for(&self.state, DocumentEditorState::enter))
+            .on_action(window.listener_for(&self.state, DocumentEditorState::shift_enter))
             .on_action(window.listener_for(&self.state, DocumentEditorState::tab))
             .on_action(window.listener_for(&self.state, DocumentEditorState::copy))
             .on_action(window.listener_for(&self.state, DocumentEditorState::cut))
