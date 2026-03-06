@@ -156,6 +156,7 @@ Type=Application
 Categories=Office;TextEditor;
 MimeType=text/markdown;text/plain;
 StartupNotify=true
+StartupWMClass=octodocs
 Terminal=false
 Keywords=markdown;editor;notes;github;docs;
 DESKTOP

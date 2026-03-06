@@ -98,6 +98,10 @@ fn main() {
                         title: Some("OctoDocs".into()),
                         ..Default::default()
                     }),
+                    // On Linux (Wayland): app_id must match the .desktop file basename
+                    // so the compositor can match the running window to the .desktop entry,
+                    // enabling taskbar icons and pinning.
+                    app_id: Some("octodocs".into()),
                     ..Default::default()
                 },
                 |window, cx| {
