@@ -1,5 +1,10 @@
 # OctoDocs Release Process
 
+> **IMPORTANT — AI agents:** Never run `git push`, `git tag`, or any release
+> step without **explicit user approval**. Prepare the changes (version bump,
+> Cargo.lock rebuild, commit) and then stop and ask the user to confirm before
+> pushing or tagging.
+
 ## Overview
 
 Releases are driven by **git tags**. Pushing a tag matching `v*` to GitHub

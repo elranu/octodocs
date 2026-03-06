@@ -1,5 +1,10 @@
 # OctoDocs — AI Agent Coding Instructions
 
+> **CRITICAL — Release discipline:** Never run `git push`, `git tag`, or
+> trigger a release without **explicit user approval**. Prepare commits locally
+> (version bump, Cargo.lock, code changes) and stop to ask the user before
+> pushing or creating a tag.
+
 ## Repository layout
 
 ```
